@@ -1,0 +1,68 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  min-height: 100vh;
+  background-color: #f8fafc;
+  color: #1e293b;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* Scrollbar styles */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Markdown content styles */
+.markdown-content h1 { font-size: 1.5rem; font-weight: 700; margin: 0.75rem 0; }
+.markdown-content h2 { font-size: 1.25rem; font-weight: 600; margin: 0.5rem 0; }
+.markdown-content h3 { font-size: 1.1rem; font-weight: 600; margin: 0.5rem 0; }
+.markdown-content p { margin: 0.4rem 0; line-height: 1.7; }
+.markdown-content ul, .markdown-content ol { padding-left: 1.5rem; margin: 0.4rem 0; }
+.markdown-content li { margin: 0.2rem 0; }
+.markdown-content code {
+  background: #e2e8f0;
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+  font-size: 0.9em;
+}
+.markdown-content pre {
+  background: #1e293b;
+  color: #e2e8f0;
+  padding: 0.75rem;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 0.5rem 0;
+}
+.markdown-content pre code {
+  background: none;
+  padding: 0;
+}
+.markdown-content strong { font-weight: 600; }
+.markdown-content blockquote {
+  border-left: 3px solid #6366f1;
+  padding-left: 0.75rem;
+  margin: 0.5rem 0;
+  color: #475569;
+}
