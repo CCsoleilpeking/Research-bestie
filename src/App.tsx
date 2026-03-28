@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useLocalStorage } from './hooks/useLocalStorage';
 import type { ChatMessage, ChatSession, DailySummaryItem, TodoItem, InsightItem, TodayPaper } from './types';
 import { genId } from './utils/id';
+import { generateChatTitle, getLLMConfig } from './utils/llm';
 import DailySummary from './components/DailySummary';
 import TodoList from './components/TodoList';
 import InsightsList from './components/InsightsList';
@@ -156,17 +157,26 @@ function App() {
   }
 
   function handleMessagesChange(messages: ChatMessage[]) {
+    const currentSession = sessions.find(s => s.id === activeId);
+    const needsTitle = currentSession?.title === 'New Chat' && messages.length > 0;
+    const firstUser = needsTitle ? messages.find(m => m.role === 'user') : null;
+
     setSessions(prev => prev.map(s => {
       if (s.id !== activeId) return s;
-      const updated = { ...s, messages };
-      if (s.title === 'New Chat' && messages.length > 0) {
-        const firstUser = messages.find(m => m.role === 'user');
-        if (firstUser) {
-          updated.title = firstUser.content.slice(0, 40) + (firstUser.content.length > 40 ? '...' : '');
-        }
-      }
-      return updated;
+      return { ...s, messages };
     }));
+
+    // Generate title asynchronously with LLM
+    if (firstUser) {
+      const config = getLLMConfig();
+      generateChatTitle(firstUser.content, config).then(title => {
+        setSessions(prev => prev.map(s => {
+          if (s.id !== activeId) return s;
+          if (s.title !== 'New Chat') return s; // already renamed
+          return { ...s, title };
+        }));
+      });
+    }
   }
 
   return (

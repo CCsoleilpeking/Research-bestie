@@ -28,8 +28,10 @@ export default function SettingsModal({ open, onClose }: Props) {
   }
 
   function handleApiKeyChange(value: string) {
-    const apiKeys = { ...config.apiKeys, [config.provider]: value };
-    const newConfig = { ...config, apiKey: value, apiKeys };
+    // Strip non-ASCII characters to prevent header errors
+    const clean = value.replace(/[^\x20-\x7E]/g, '').trim();
+    const apiKeys = { ...config.apiKeys, [config.provider]: clean };
+    const newConfig = { ...config, apiKey: clean, apiKeys };
     autoSaveKeys(newConfig);
   }
 

@@ -51,6 +51,7 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
   const [editText, setEditText] = useState('');
   const [editHeight, setEditHeight] = useState<number | null>(null);
   const [editWidth, setEditWidth] = useState<number | null>(null);
+  const isComposingRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -233,7 +234,9 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
                       className="w-full text-sm bg-transparent text-gray-200 resize-none focus:outline-none"
                       style={{ height: editHeight ? `${editHeight - 20}px` : undefined, minHeight: '2em' }}
                       autoFocus
-                      onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleEditResend(msg.id); } }}
+                      onCompositionStart={() => { isComposingRef.current = true; }}
+                      onCompositionEnd={() => { isComposingRef.current = false; }}
+                      onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !isComposingRef.current) { e.preventDefault(); handleEditResend(msg.id); } }}
                     />
                   </div>
                   <div className="flex gap-2 mt-1.5 justify-end">
@@ -337,7 +340,9 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleSend()}
+            onCompositionStart={() => { isComposingRef.current = true; }}
+            onCompositionEnd={() => { isComposingRef.current = false; }}
+            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !isComposingRef.current) handleSend(); }}
             placeholder="Enter paper title or research question..."
             className="flex-1 border border-dark-50/30 rounded-xl px-4 py-2.5 text-sm bg-dark-400 text-white placeholder-gray-600 focus:ring-2 focus:ring-mint-400/30 focus:border-transparent focus:outline-none"
             disabled={loading}

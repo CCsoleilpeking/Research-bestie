@@ -96,13 +96,72 @@ export function saveLLMConfig(config: LLMConfig) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
 }
 
+export async function generateChatTitle(firstMessage: string, config: LLMConfig): Promise<string> {
+  const fallback = firstMessage.slice(0, 30) + (firstMessage.length > 30 ? '...' : '');
+  const apiKey = config.apiKey?.trim();
+  if (!apiKey) return fallback;
+  // Validate apiKey is ASCII-safe for HTTP headers
+  if (!/^[\x20-\x7E]+$/.test(apiKey)) {
+    logError('API key contains non-ASCII characters, skipping title gen');
+    return fallback;
+  }
+  try {
+    log('Generating chat title for:', firstMessage.slice(0, 50));
+    log('Title gen using provider:', config.provider, 'key length:', apiKey.length);
+    const promptText = `Generate a short title (under 10 words) for a conversation that starts with this message. Use the same language as the message. Reply with ONLY the title, no quotes, no explanation:\n\n${firstMessage}`;
+
+    let title: string;
+    if (config.provider === 'claude') {
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true',
+        },
+        body: JSON.stringify({ model: config.model, max_tokens: 50, messages: [{ role: 'user', content: promptText }] }),
+      });
+      if (!response.ok) throw new Error(`Claude title gen failed: ${response.status}`);
+      const data = await response.json();
+      title = data.content?.[0]?.text || fallback;
+    } else {
+      const provider = PROVIDERS[config.provider];
+      const response = await fetch(`${provider.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({ model: config.model, messages: [{ role: 'user', content: promptText }], max_tokens: 50 }),
+      });
+      if (!response.ok) throw new Error(`Title gen failed: ${response.status}`);
+      const data = await response.json();
+      title = data.choices?.[0]?.message?.content || fallback;
+    }
+
+    title = title.trim().replace(/^["']|["']$/g, '');
+    log('Generated title:', title);
+    return title || fallback;
+  } catch (err) {
+    logError('Title generation failed, using fallback:', err);
+    return fallback;
+  }
+}
+
 const SYSTEM_PROMPT = `You are ResearchBestie — a helpful, top-tier powerhouse of intelligence.`;
+
+// Strip non-ASCII characters from API key (fixes ISO-8859-1 header errors)
+function sanitizeApiKey(key: string): string {
+  return key.replace(/[^\x20-\x7E]/g, '').trim();
+}
 
 export async function sendChatMessage(
   messages: ChatMessage[],
   config: LLMConfig,
   onChunk?: (chunk: string) => void
 ): Promise<string> {
+  config = { ...config, apiKey: sanitizeApiKey(config.apiKey || '') };
   if (!config.apiKey) {
     logError('No API key configured');
     throw new Error('Please configure your API key in settings.');
