@@ -81,41 +81,6 @@ ssh -L 5173:localhost:5173 -L 3001:localhost:3001 user@your-server-ip
 5. Click **Use this model**
 6. Start chatting!
 
-### Architecture
-
-```
-Frontend (React, port 5173)
-  ↕
-Backend (Express, port 3001)
-  ├── /api/chat    → LLM call + auto web search
-  ├── /api/tools   → Available tools list
-  └── /api/health  → Health check
-        ↕
-  Exa MCP (mcp.exa.ai) → Free web search
-```
-
-When a user sends a message:
-1. Frontend sends it to the backend `/api/chat`
-2. Backend forwards to the LLM with a system prompt that includes search capability
-3. If the LLM decides it needs to search, it returns a `[SEARCH: query]` tag
-4. Backend detects the tag, calls Exa for search results
-5. Results are sorted by trusted domains (arxiv, IEEE, ACM, etc. get priority)
-6. Backend sends search results back to the LLM for a final answer
-7. Final answer is returned to the frontend
-
-### Tech Stack
-
-- **React 18** + **TypeScript** — Frontend
-- **Vite** — Build tool
-- **Tailwind CSS** — Styling
-- **Express** — Backend server
-- **MCP SDK** — Model Context Protocol client for Exa
-- **Exa AI** — Web search (free tier, no API key needed)
-- **react-markdown** — Markdown rendering
-- **remark-gfm** — GitHub Flavored Markdown (tables, strikethrough, etc.)
-- **remark-math** + **rehype-katex** — Math formula rendering
-- **KaTeX** — LaTeX math typesetting
-
 ### License
 
 MIT
@@ -194,41 +159,6 @@ ssh -L 5173:localhost:5173 -L 3001:localhost:3001 user@你的服务器IP
 4. 从下拉菜单选择模型
 5. 点击 **Use this model**
 6. 开始聊天！
-
-### 架构
-
-```
-前端 (React, 端口 5173)
-  ↕
-后端 (Express, 端口 3001)
-  ├── /api/chat    → LLM 调用 + 自动联网搜索
-  ├── /api/tools   → 可用工具列表
-  └── /api/health  → 健康检查
-        ↕
-  Exa MCP (mcp.exa.ai) → 免费联网搜索
-```
-
-用户发送消息时：
-1. 前端将消息发送到后端 `/api/chat`
-2. 后端携带包含搜索能力描述的系统提示词转发给 LLM
-3. 如果 LLM 判断需要搜索，会返回 `[SEARCH: 查询词]` 标记
-4. 后端检测到标记后，调用 Exa 进行搜索
-5. 搜索结果按可信域名排序（arxiv、IEEE、ACM 等优先）
-6. 后端将搜索结果发回 LLM 生成最终回答
-7. 最终回答返回前端
-
-### 技术栈
-
-- **React 18** + **TypeScript** — 前端
-- **Vite** — 构建工具
-- **Tailwind CSS** — 样式框架
-- **Express** — 后端服务
-- **MCP SDK** — Model Context Protocol 客户端，连接 Exa
-- **Exa AI** — 联网搜索（免费版，无需 API Key）
-- **react-markdown** — Markdown 渲染
-- **remark-gfm** — GitHub 风格 Markdown（表格、删除线等）
-- **remark-math** + **rehype-katex** — 数学公式渲染
-- **KaTeX** — LaTeX 数学排版
 
 ### 许可证
 
