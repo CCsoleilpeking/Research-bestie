@@ -52,9 +52,69 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
   const [editHeight, setEditHeight] = useState<number | null>(null);
   const [editWidth, setEditWidth] = useState<number | null>(null);
   const isComposingRef = useRef(false);
+  const [loadingHint, setLoadingHint] = useState('');
+  const loadingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const usedHintsRef = useRef<Set<number>>(new Set());
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+
+  const LOADING_HINTS = [
+    "I'm on it — go play on your phone.",
+    "I'm working here — scroll something fun.",
+    "Busy working — phone break for you.",
+    "Still working — go tap around a little.",
+    "Hang tight-ish — go entertain yourself.",
+    "I'm working — go grab a snack.",
+    "Still busy — snack time?",
+    "Let me work — you go find a treat.",
+    "I'm doing the hard part — you grab chips.",
+    "Working away — go reward yourself with a snack.",
+    "I'm working very hard — a little water would be nice.",
+    "I'm doing the hard part — where's my snack?",
+    "I'm suffering for this — at least bring me a drink.",
+    "I'm working overtime — a shoulder rub seems fair.",
+    "I'm carrying this search — the least you can do is bring snacks.",
+    "Doing my thing — go be adorable somewhere else.",
+    "Working hard — please distract yourself.",
+    "Cooking up results — go cause harmless chaos.",
+    "Making progress — go poke at your phone.",
+    "Searching in style — you go vibe for a minute.",
+    "I'm fighting for my life in here — go get a snack.",
+    "I'm working my little heart out — scroll something nice.",
+    "I'm doing wizard stuff — you go chill.",
+    "I'm out here suffering beautifully — bring me water.",
+    "I'm giving this everything I've got — go snack responsibly.",
+  ];
+
+  function getRandomHint() {
+    if (usedHintsRef.current.size >= LOADING_HINTS.length) usedHintsRef.current.clear();
+    let idx: number;
+    do { idx = Math.floor(Math.random() * LOADING_HINTS.length); } while (usedHintsRef.current.has(idx));
+    usedHintsRef.current.add(idx);
+    return LOADING_HINTS[idx];
+  }
+
+  useEffect(() => {
+    if (loading && !streamingContent) {
+      // After 3 seconds, start showing hints
+      const timeout = setTimeout(() => {
+        setLoadingHint(getRandomHint());
+        // Then rotate every 5 seconds
+        loadingTimerRef.current = setInterval(() => {
+          setLoadingHint(getRandomHint());
+        }, 5000);
+      }, 3000);
+      return () => {
+        clearTimeout(timeout);
+        if (loadingTimerRef.current) clearInterval(loadingTimerRef.current);
+        setLoadingHint('');
+      };
+    } else {
+      setLoadingHint('');
+      if (loadingTimerRef.current) { clearInterval(loadingTimerRef.current); loadingTimerRef.current = null; }
+    }
+  }, [loading, streamingContent]);
 
   const totalMatches = searchQuery
     ? messages.reduce((sum, m) => sum + countMatches(m.content, searchQuery), 0)
@@ -327,6 +387,9 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
                 <span className="w-2 h-2 bg-mint-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></span>
                 <span className="w-2 h-2 bg-mint-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></span>
               </div>
+              {loadingHint && (
+                <p className="text-xs text-gray-500 mt-2 italic transition-opacity duration-500">{loadingHint}</p>
+              )}
             </div>
           </div>
         )}

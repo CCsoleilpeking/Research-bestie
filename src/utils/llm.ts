@@ -156,6 +156,38 @@ function sanitizeApiKey(key: string): string {
   return key.replace(/[^\x20-\x7E]/g, '').trim();
 }
 
+const BACKEND_URL = 'http://localhost:3001';
+
+async function sendViaBackend(messages: ChatMessage[], config: LLMConfig): Promise<string | null> {
+  try {
+    const response = await fetch(`${BACKEND_URL}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages: messages.map(m => ({ role: m.role, content: m.content })),
+        provider: config.provider,
+        apiKey: config.apiKey,
+        model: config.model,
+      }),
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      logError('[Backend] Error:', err);
+      return null;
+    }
+
+    const data = await response.json();
+    if (data.searched) {
+      log(`[Backend] Search was triggered for: "${data.query}"`);
+    }
+    return data.content;
+  } catch (err) {
+    log('[Backend] Not available, falling back to direct LLM call');
+    return null;
+  }
+}
+
 export async function sendChatMessage(
   messages: ChatMessage[],
   config: LLMConfig,
@@ -171,6 +203,17 @@ export async function sendChatMessage(
   const startTime = performance.now();
 
   try {
+    // Try backend first (has search capability)
+    if (!onChunk) {
+      const backendResult = await sendViaBackend(messages, config);
+      if (backendResult !== null) {
+        const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
+        log(`[Backend] Response received in ${elapsed}s, length=${backendResult.length}`);
+        return backendResult;
+      }
+    }
+
+    // Fallback: direct LLM call (no search capability)
     let result: string;
     if (config.provider === 'claude') {
       result = await sendClaudeMessage(messages, config, onChunk);
