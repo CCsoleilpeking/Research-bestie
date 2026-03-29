@@ -20,6 +20,7 @@
     "katex": "^0.16.42",
     "multer": "^2.1.1",
     "officeparser": "^6.0.7",
+    "pdf-parse": "^2.2.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",

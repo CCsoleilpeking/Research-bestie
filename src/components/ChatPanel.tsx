@@ -402,7 +402,7 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
                       Edit
                     </button>
                   )}
-                  {msg.role === 'assistant' && !msg.content.startsWith('Error:') && (
+                  {msg.role === 'assistant' && !msg.content.includes('Error') && (
                     <div className="flex gap-1.5">
                       <button onClick={() => onSave(msg.content, 'summary')} className="bg-mint-400/20 text-mint-400 text-xs px-2 py-0.5 rounded-lg hover:bg-mint-400/30">Save to Summary</button>
                       <button onClick={() => onSave(msg.content, 'insight')} className="bg-mint-400/20 text-mint-400 text-xs px-2 py-0.5 rounded-lg hover:bg-mint-400/30">Save to Insights</button>

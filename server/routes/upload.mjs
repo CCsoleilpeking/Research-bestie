@@ -6,9 +6,17 @@ import { addDocument } from '../db.mjs';
 
 const router = Router();
 
-// Store uploads in memory (small files) or temp dir
+// Store uploads with original extension preserved
+const storage = multer.diskStorage({
+  destination: '/tmp/bestie-uploads/',
+  filename: (req, file, cb) => {
+    const ext = extname(file.originalname).toLowerCase();
+    cb(null, `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`);
+  },
+});
+
 const upload = multer({
-  dest: '/tmp/bestie-uploads/',
+  storage,
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
 });
 
@@ -50,8 +58,9 @@ router.post('/', upload.single('file'), async (req, res) => {
     }
     // Office/PDF formats — use officeparser
     else {
-      const officeparser = await import('officeparser');
-      contentText = await officeparser.parseOfficeAsync(filePath);
+      const { parseOffice } = await import('officeparser');
+      const result = await parseOffice(filePath);
+      contentText = result.toText();
     }
 
     if (!contentText || contentText.trim().length === 0) {
