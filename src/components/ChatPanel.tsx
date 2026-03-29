@@ -13,6 +13,7 @@ interface Props {
   onSelectText: (text: string, position: { x: number; y: number }) => void;
   onSave: (text: string, target: 'summary' | 'insight') => void;
   onNewChat: () => void;
+  sessionId?: string;
 }
 
 function HighlightText({ text, query, activeIndex, startIndex }: { text: string; query: string; activeIndex: number; startIndex: number }) {
@@ -40,7 +41,7 @@ function countMatches(text: string, query: string): number {
   return (text.match(new RegExp(escaped, 'gi')) || []).length;
 }
 
-export default function ChatPanel({ messages, onChange, onSelectText, onSave, onNewChat }: Props) {
+export default function ChatPanel({ messages, onChange, onSelectText, onSave, onNewChat, sessionId }: Props) {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [streamingContent, setStreamingContent] = useState('');
@@ -55,6 +56,9 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
   const [loadingHint, setLoadingHint] = useState('');
   const loadingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const usedHintsRef = useRef<Set<number>>(new Set());
+  const [uploadedFile, setUploadedFile] = useState<{ filename: string; contentText: string; docId: string } | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -141,7 +145,15 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
     const text = input.trim();
     if (!text || loading) return;
     console.log('[Chat] User sending:', text.slice(0, 100));
-    const userMsg: ChatMessage = { id: genId(), role: 'user', content: text, timestamp: new Date().toISOString() };
+
+    // If file is uploaded, prepend file content to user message
+    let msgContent = text;
+    if (uploadedFile) {
+      msgContent = `[Uploaded file: ${uploadedFile.filename}, doc_id: ${uploadedFile.docId}]\n\n${uploadedFile.contentText.slice(0, 30000)}\n\n---\nUser question: ${text}`;
+      setUploadedFile(null);
+    }
+
+    const userMsg: ChatMessage = { id: genId(), role: 'user', content: msgContent, timestamp: new Date().toISOString() };
     const newMessages = [...messages, userMsg];
     onChange(newMessages);
     setInput('');
@@ -150,7 +162,7 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
     try {
       const config = getLLMConfig();
       console.log('[Chat] Config:', { provider: config.provider, model: config.model, hasKey: !!config.apiKey });
-      const response = await sendChatMessage(newMessages, config, (chunk) => { setStreamingContent(chunk); });
+      const response = await sendChatMessage(newMessages, config, (chunk) => { setStreamingContent(chunk); }, sessionId);
       console.log('[Chat] Response received, length:', response.length);
       onChange([...newMessages, { id: genId(), role: 'assistant', content: response, timestamp: new Date().toISOString() }]);
     } catch (err) {
@@ -201,6 +213,42 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
     if (text && text.length > 0) {
       e.preventDefault();
       onSelectText(text, { x: e.clientX, y: e.clientY });
+    }
+  }
+
+  async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      if (sessionId) formData.append('sessionId', sessionId);
+
+      const response = await fetch('http://localhost:3001/api/upload', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.error || 'Upload failed');
+      }
+
+      const data = await response.json();
+      console.log('[Chat] File uploaded:', data.filename, data.contentLength, 'chars');
+      setUploadedFile({ filename: data.filename, contentText: data.contentText, docId: data.docId });
+    } catch (err) {
+      console.error('[Chat] Upload error:', err);
+      const errorMsg: ChatMessage = {
+        id: genId(), role: 'assistant',
+        content: `Error uploading file: ${err instanceof Error ? err.message : 'Unknown error'}`,
+        timestamp: new Date().toISOString(),
+      };
+      onChange([...messages, errorMsg]);
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
     }
   }
 
@@ -399,14 +447,41 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
 
       {/* Input */}
       <div className="px-4 py-3 bg-dark-200 border-t border-dark-50/30">
+        {/* File upload indicator */}
+        {uploadedFile && (
+          <div className="flex items-center gap-2 mb-2 px-3 py-1.5 bg-mint-400/10 border border-mint-400/20 rounded-lg text-xs text-mint-400">
+            <span>📎 {uploadedFile.filename}</span>
+            <button onClick={() => setUploadedFile(null)} className="text-gray-500 hover:text-white">&times;</button>
+          </div>
+        )}
+        {uploading && (
+          <div className="flex items-center gap-2 mb-2 px-3 py-1.5 text-xs text-gray-400">
+            <span>Uploading...</span>
+          </div>
+        )}
         <div className="flex gap-2">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".pdf,.docx,.pptx,.xlsx,.odt,.odp,.ods,.rtf,.txt,.md,.html,.htm,.csv"
+            onChange={handleFileUpload}
+            className="hidden"
+          />
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={loading || uploading}
+            className="text-gray-500 hover:text-mint-400 px-2 py-2.5 text-lg disabled:opacity-30 transition-colors"
+            title="Upload file"
+          >
+            📎
+          </button>
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onCompositionStart={() => { isComposingRef.current = true; }}
             onCompositionEnd={() => { isComposingRef.current = false; }}
             onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !isComposingRef.current) handleSend(); }}
-            placeholder="Enter paper title or research question..."
+            placeholder={uploadedFile ? "Ask about the uploaded file..." : "Enter paper title or research question..."}
             className="flex-1 border border-dark-50/30 rounded-xl px-4 py-2.5 text-sm bg-dark-400 text-white placeholder-gray-600 focus:ring-2 focus:ring-mint-400/30 focus:border-transparent focus:outline-none"
             disabled={loading}
           />

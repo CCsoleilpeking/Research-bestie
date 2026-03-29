@@ -234,6 +234,7 @@ function App() {
           onSelectText={handleSelectText}
           onSave={(text, target) => handleSaveToModule(target, text)}
           onNewChat={handleNewSession}
+          sessionId={activeId}
         />
 
         {overlayPanel === 'insights' && !editingInsightId && (

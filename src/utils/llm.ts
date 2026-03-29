@@ -158,7 +158,7 @@ function sanitizeApiKey(key: string): string {
 
 const BACKEND_URL = 'http://localhost:3001';
 
-async function sendViaBackend(messages: ChatMessage[], config: LLMConfig): Promise<string | null> {
+async function sendViaBackend(messages: ChatMessage[], config: LLMConfig, sessionId?: string): Promise<string | null> {
   try {
     const response = await fetch(`${BACKEND_URL}/api/chat`, {
       method: 'POST',
@@ -168,6 +168,7 @@ async function sendViaBackend(messages: ChatMessage[], config: LLMConfig): Promi
         provider: config.provider,
         apiKey: config.apiKey,
         model: config.model,
+        sessionId,
       }),
     });
 
@@ -179,7 +180,10 @@ async function sendViaBackend(messages: ChatMessage[], config: LLMConfig): Promi
 
     const data = await response.json();
     if (data.searched) {
-      log(`[Backend] Search was triggered for: "${data.query}"`);
+      log(`[Backend] Search was triggered for: "${data.searchQuery}"`);
+    }
+    if (data.recalled) {
+      log('[Backend] Memory recall was triggered');
     }
     return data.content;
   } catch (err) {
@@ -191,7 +195,8 @@ async function sendViaBackend(messages: ChatMessage[], config: LLMConfig): Promi
 export async function sendChatMessage(
   messages: ChatMessage[],
   config: LLMConfig,
-  onChunk?: (chunk: string) => void
+  onChunk?: (chunk: string) => void,
+  sessionId?: string
 ): Promise<string> {
   config = { ...config, apiKey: sanitizeApiKey(config.apiKey || '') };
   if (!config.apiKey) {
@@ -203,9 +208,9 @@ export async function sendChatMessage(
   const startTime = performance.now();
 
   try {
-    // Try backend first (has search capability)
+    // Try backend first (has search + memory capability)
     if (!onChunk) {
-      const backendResult = await sendViaBackend(messages, config);
+      const backendResult = await sendViaBackend(messages, config, sessionId);
       if (backendResult !== null) {
         const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
         log(`[Backend] Response received in ${elapsed}s, length=${backendResult.length}`);

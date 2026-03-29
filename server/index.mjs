@@ -2,6 +2,12 @@ import express from 'express';
 import cors from 'cors';
 import { searchExa } from './tools/exa-search.mjs';
 import { sortByTrust } from './tools/trusted-domains.mjs';
+import sessionRoutes from './routes/sessions.mjs';
+import uploadRoutes from './routes/upload.mjs';
+import {
+  getMessages, addMessage, getMessageCount,
+  getSummaries, addSummary, clearSummaries, clearSessionMessages,
+} from './db.mjs';
 
 const app = express();
 const PORT = 3001;
@@ -9,7 +15,7 @@ const PORT = 3001;
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Provider configs (same as frontend)
+// Provider configs
 const PROVIDER_CONFIGS = {
   openai: { baseUrl: 'https://api.openai.com/v1', type: 'openai' },
   claude: { baseUrl: 'https://api.anthropic.com/v1', type: 'claude' },
@@ -19,8 +25,11 @@ const PROVIDER_CONFIGS = {
   ionet: { baseUrl: 'https://api.intelligence.io.solutions/api/v1', type: 'openai' },
 };
 
+const COMPRESS_EVERY = 20; // Compress every N rounds (1 round = 1 user + 1 assistant message)
+
 const SYSTEM_PROMPT = `You are ResearchBestie — a helpful, top-tier powerhouse of intelligence.
 
+## Web Search
 You have access to a web search tool. When you need to search for information that you don't know or are not confident about (such as a paper title, URL, recent events, or any factual question), reply with ONLY this format on a single line:
 
 [SEARCH: your search query here]
@@ -31,11 +40,34 @@ Rules:
 - Only use [SEARCH:] when you genuinely need external information
 - Do not use [SEARCH:] for general knowledge you are confident about
 - When you receive search results, synthesize them into a helpful answer
-- Always cite sources with URLs when using search results`;
+- Always cite sources with URLs when using search results
+
+## Forget History
+If the user asks to forget, clear, or reset previous conversation history, include this tag at the end of your response:
+
+[FORGET_HISTORY]
+
+## Memory Recall
+You have access to a memory system that stores previous conversation history.
+When the user asks about previous discussions, or when you need context from earlier in the conversation that you don't currently see, reply with:
+
+[RECALL: keywords or topic to search for]
+
+The system will search the memory and return relevant conversation summaries.`;
+
+const COMPRESS_PROMPT = `\n\nIMPORTANT: This conversation has reached a milestone. At the very end of your response, after answering the user, generate a compressed summary of ALL the conversation above. Use this exact format:
+
+[SUMMARY]
+(Write a concise summary preserving role information. For each significant exchange, write: "User asked/did X. Assistant explained/did Y." Use the same language as the conversation.)
+[/SUMMARY]`;
+
+// --- Routes ---
+app.use('/api/sessions', sessionRoutes);
+app.use('/api/upload', uploadRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', tools: ['exa-search'], hasChat: true });
+  res.json({ status: 'ok', tools: ['exa-search'], hasChat: true, hasDb: true });
 });
 
 // List available tools
@@ -47,7 +79,7 @@ app.get('/api/tools', (req, res) => {
 
 // Main chat endpoint
 app.post('/api/chat', async (req, res) => {
-  const { messages, provider, apiKey, model, stream } = req.body;
+  const { messages, provider, apiKey, model, stream, sessionId } = req.body;
 
   if (!apiKey || !model || !provider) {
     return res.status(400).json({ error: 'Missing provider, apiKey, or model' });
@@ -58,51 +90,104 @@ app.post('/api/chat', async (req, res) => {
     return res.status(400).json({ error: `Unknown provider: ${provider}` });
   }
 
-  console.log(`[Chat] provider=${provider}, model=${model}, messages=${messages.length}, stream=${!!stream}`);
+  // Count rounds for this session (1 round = 2 messages: user + assistant)
+  let roundCount = 0;
+  let shouldCompress = false;
+  if (sessionId) {
+    const msgCount = getMessageCount(sessionId);
+    roundCount = Math.floor(msgCount / 2);
+    // Check if we're at a compression milestone
+    shouldCompress = roundCount > 0 && roundCount % COMPRESS_EVERY === 0;
+  }
+
+  console.log(`[Chat] provider=${provider}, model=${model}, messages=${messages.length}, rounds=${roundCount}, compress=${shouldCompress}`);
 
   try {
-    // Step 1: Send to LLM with search capability in system prompt
-    const startTime = Date.now();
-    const firstResponse = await callLLM(config, apiKey, model, [
-      { role: 'system', content: SYSTEM_PROMPT },
-      ...messages,
-    ]);
+    // Build context: summaries + recent messages
+    const contextMessages = buildContext(messages, sessionId, shouldCompress);
 
+    const startTime = Date.now();
+
+    // Step 1: Send to LLM
+    const firstResponse = await callLLM(config, apiKey, model, contextMessages);
     console.log(`[Chat] First LLM response (${Date.now() - startTime}ms):`, firstResponse.slice(0, 100));
 
-    // Step 2: Check if LLM wants to search
-    const searchMatch = firstResponse.match(/\[SEARCH:\s*(.+?)\]/);
+    // Step 2: Check for tags and process
+    let finalResponse = firstResponse;
+    let searched = false;
+    let searchQuery = null;
+    let recalled = false;
+
+    // Check for [SEARCH:]
+    const searchMatch = finalResponse.match(/\[SEARCH:\s*(.+?)\]/);
     if (searchMatch) {
-      const query = searchMatch[1].trim();
-      console.log(`[Chat] LLM requested search: "${query}"`);
+      searchQuery = searchMatch[1].trim();
+      console.log(`[Chat] LLM requested search: "${searchQuery}"`);
 
-      // Step 3: Search via Exa
       const searchStart = Date.now();
-      const searchResult = await searchExa({ query, numResults: 5 });
-      console.log(`[Chat] Exa search done (${Date.now() - searchStart}ms), results: ${searchResult.results?.length || 0}`);
+      const searchResult = await searchExa({ query: searchQuery, numResults: 5 });
+      console.log(`[Chat] Exa search done (${Date.now() - searchStart}ms)`);
 
-      // Step 4: Sort by trusted domains
       const sorted = sortByTrust(searchResult.results || []);
-      console.log(`[Chat] After trust sort: ${sorted.length} results`);
-
-      // Step 5: Format search results for LLM
       const searchContext = formatSearchResults(sorted);
 
-      // Step 6: Send to LLM again with search results
-      const secondStart = Date.now();
-      const finalResponse = await callLLM(config, apiKey, model, [
-        { role: 'system', content: SYSTEM_PROMPT },
-        ...messages,
-        { role: 'assistant', content: `[SEARCH: ${query}]` },
+      const secondResponse = await callLLM(config, apiKey, model, [
+        ...contextMessages,
+        { role: 'assistant', content: `[SEARCH: ${searchQuery}]` },
         { role: 'user', content: `Here are the search results:\n\n${searchContext}\n\nPlease answer the original question based on these search results. Cite sources with URLs.` },
       ]);
 
-      console.log(`[Chat] Second LLM response (${Date.now() - secondStart}ms), total: ${Date.now() - startTime}ms`);
-      return res.json({ content: finalResponse, searched: true, query });
+      finalResponse = secondResponse;
+      searched = true;
     }
 
-    // No search needed
-    return res.json({ content: firstResponse, searched: false });
+    // Check for [RECALL:]
+    const recallMatch = finalResponse.match(/\[RECALL:\s*(.+?)\]/);
+    if (recallMatch && sessionId) {
+      const recallQuery = recallMatch[1].trim();
+      console.log(`[Chat] LLM requested recall: "${recallQuery}"`);
+
+      const summaries = getSummaries(sessionId);
+      const recallContext = summaries.length > 0
+        ? summaries.map(s => s.summary).join('\n\n')
+        : 'No previous conversation summaries found.';
+
+      const recallResponse = await callLLM(config, apiKey, model, [
+        ...contextMessages,
+        { role: 'assistant', content: `[RECALL: ${recallQuery}]` },
+        { role: 'user', content: `Here are the previous conversation summaries:\n\n${recallContext}\n\nPlease answer based on these memories.` },
+      ]);
+
+      finalResponse = recallResponse;
+      recalled = true;
+    }
+
+    // Check for [FORGET_HISTORY]
+    if (finalResponse.includes('[FORGET_HISTORY]') && sessionId) {
+      console.log(`[Chat] Forgetting history for session ${sessionId}`);
+      clearSessionMessages(sessionId);
+      clearSummaries(sessionId);
+      finalResponse = finalResponse.replace(/\[FORGET_HISTORY\]/g, '').trim();
+    }
+
+    // Check for [SUMMARY] (compression result)
+    const summaryMatch = finalResponse.match(/\[SUMMARY\]([\s\S]*?)\[\/SUMMARY\]/);
+    if (summaryMatch && sessionId) {
+      const summary = summaryMatch[1].trim();
+      console.log(`[Chat] Saving compressed summary (${summary.length} chars)`);
+      addSummary(sessionId, summary, Math.max(0, roundCount - COMPRESS_EVERY), roundCount);
+      finalResponse = finalResponse.replace(/\[SUMMARY\][\s\S]*?\[\/SUMMARY\]/g, '').trim();
+    }
+
+    // Clean any remaining tags
+    finalResponse = finalResponse
+      .replace(/\[SEARCH:[^\]]*\]/g, '')
+      .replace(/\[RECALL:[^\]]*\]/g, '')
+      .replace(/\[FORGET_HISTORY\]/g, '')
+      .trim();
+
+    console.log(`[Chat] Done. total=${Date.now() - startTime}ms, searched=${searched}, recalled=${recalled}`);
+    return res.json({ content: finalResponse, searched, searchQuery, recalled });
 
   } catch (err) {
     console.error('[Chat] Error:', err.message);
@@ -110,7 +195,35 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
-// --- LLM call functions ---
+// --- Helper functions ---
+
+function buildContext(messages, sessionId, shouldCompress) {
+  let systemPrompt = SYSTEM_PROMPT;
+
+  // Add compression instruction if at milestone
+  if (shouldCompress) {
+    systemPrompt += COMPRESS_PROMPT;
+  }
+
+  const contextMessages = [{ role: 'system', content: systemPrompt }];
+
+  // Add summaries if available
+  if (sessionId) {
+    const summaries = getSummaries(sessionId);
+    if (summaries.length > 0) {
+      const summaryText = summaries.map(s => s.summary).join('\n\n');
+      contextMessages.push({
+        role: 'system',
+        content: `Previous conversation summary:\n${summaryText}`,
+      });
+    }
+  }
+
+  // Add recent messages
+  contextMessages.push(...messages.map(m => ({ role: m.role, content: m.content })));
+
+  return contextMessages;
+}
 
 async function callLLM(config, apiKey, model, messages) {
   if (config.type === 'claude') {
@@ -139,8 +252,8 @@ async function callOpenAICompatible(baseUrl, apiKey, model, messages) {
 }
 
 async function callClaude(apiKey, model, messages) {
-  // Extract system message
-  const systemMsg = messages.find(m => m.role === 'system')?.content || '';
+  const systemMsgs = messages.filter(m => m.role === 'system');
+  const systemText = systemMsgs.map(m => m.content).join('\n\n');
   const chatMsgs = messages.filter(m => m.role !== 'system');
 
   const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -150,7 +263,7 @@ async function callClaude(apiKey, model, messages) {
       'x-api-key': apiKey,
       'anthropic-version': '2023-06-01',
     },
-    body: JSON.stringify({ model, max_tokens: 4096, system: systemMsg, messages: chatMsgs }),
+    body: JSON.stringify({ model, max_tokens: 4096, system: systemText, messages: chatMsgs }),
   });
 
   if (!response.ok) {
@@ -164,7 +277,6 @@ async function callClaude(apiKey, model, messages) {
 
 function formatSearchResults(results) {
   if (!results.length) return 'No results found.';
-
   return results.map((r, i) => {
     let text = `[${i + 1}] ${r.title || 'Untitled'}`;
     if (r.url) text += `\nURL: ${r.url}`;
@@ -176,5 +288,5 @@ function formatSearchResults(results) {
 
 app.listen(PORT, () => {
   console.log(`[MCP] Server running on http://localhost:${PORT}`);
-  console.log(`[MCP] Endpoints: /api/health, /api/tools, /api/chat`);
+  console.log(`[MCP] Endpoints: /api/health, /api/tools, /api/chat, /api/sessions`);
 });
