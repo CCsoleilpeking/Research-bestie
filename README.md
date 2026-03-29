@@ -14,23 +14,13 @@ A research companion web app that helps you read, discuss, and organize academic
 
 ### Features
 
-- **Multi-LLM Support** — Connect to OpenAI, Claude, DeepSeek, Kimi, Gemini, or io.net with your own API key
-- **Web Search** — Backend automatically searches the web (via Exa AI) when the LLM needs external information, with trusted academic domain prioritization and full-page crawling
-- **File Upload** — Upload PDF, DOCX, PPTX, XLSX, TXT, MD, HTML, CSV, RTF and more for AI analysis
-- **Memory System** — SQLite-based conversation storage with automatic compression every 20 rounds
-- **Research Chat** — Discuss papers and research ideas with AI in a conversational interface
-- **Multiple Chat Sessions** — Create, rename, delete, and switch between chat sessions
-- **Markdown Rendering** — Full markdown support including tables (GFM), math formulas (KaTeX), and code blocks
-- **Daily Summary** — Save important content from chats to daily summaries, organized by a calendar view
-- **Insights** — Capture key insights from your reading and discussions
-- **Today's Papers** — Track which papers you read each day
-- **TODO List** — Manage research tasks
-- **Welcome Back** — See a summary of today's papers and insights when you return
-- **Search** — Search through chat history with keyword highlighting and navigation
-- **Right-Click Save** — Select text in chat and right-click to save to Summary, Insights, Today's Papers, or quote to chat
-- **Edit Messages** — Edit and resend your messages to get new AI responses
-- **Markdown Editor** — Edit saved content with a full-featured markdown editor with syntax tips
-- **Drag & Drop Upload** — Drag files directly into the chat area to upload (max 4 files, 10MB each)
+- **Multi-LLM Support** — OpenAI, Claude, DeepSeek, Kimi, Gemini, io.net
+- **Web Search** — Auto search via Exa AI with full-page crawling and trusted domain prioritization
+- **File Upload** — PDF, DOCX, PPTX, XLSX, TXT, MD, HTML and more (drag & drop, max 4 files)
+- **Memory System** — SQLite conversation storage with auto compression
+- **Research Tools** — Daily Summary, Insights, Today's Papers, TODO List with calendar view
+- **Markdown Rendering** — Tables, math formulas (KaTeX), code blocks
+- **Multiple Chat Sessions** — Create, rename, delete, switch
 
 ### Getting Started
 
@@ -103,23 +93,13 @@ MIT
 
 ### 功能特性
 
-- **多模型支持** — 支持 OpenAI、Claude、DeepSeek、Kimi、Gemini、io.net，使用你自己的 API Key
-- **联网搜索** — 后端通过 Exa AI 自动联网搜索，LLM 需要外部信息时自动触发，优先展示可信学术域名的结果，并自动抓取论文全文
-- **文件上传** — 支持上传 PDF、DOCX、PPTX、XLSX、TXT、MD、HTML、CSV、RTF 等格式进行 AI 分析
-- **记忆系统** — 基于 SQLite 的对话存储，每 20 轮自动压缩记忆
-- **研究对话** — 以对话形式与 AI 讨论论文和研究想法
-- **多会话管理** — 创建、重命名、删除、切换多个聊天会话
-- **Markdown 渲染** — 完整的 Markdown 支持，包括表格（GFM）、数学公式（KaTeX）和代码块
-- **每日摘要** — 将聊天中的重要内容保存到每日摘要，通过日历视图管理
-- **研究洞察** — 记录阅读和讨论中的关键发现
-- **今日论文** — 追踪每天阅读了哪些论文
-- **待办事项** — 管理研究任务
-- **欢迎回来** — 打开页面时自动展示今日的论文和洞察摘要
-- **聊天搜索** — 搜索聊天记录，支持关键词高亮和逐条跳转
-- **右键保存** — 选中聊天中的文字，右键即可保存到摘要、洞察、今日论文，或引用到聊天框
-- **消息编辑** — 编辑已发送的消息并重新获取 AI 回复
-- **Markdown 编辑器** — 内置编辑器，支持 Markdown 语法提示
-- **拖拽上传** — 直接拖拽文件到聊天区域上传（最多 4 个文件，每个不超过 10MB）
+- **多模型支持** — OpenAI、Claude、DeepSeek、Kimi、Gemini、io.net
+- **联网搜索** — 通过 Exa AI 自动搜索，自动抓取论文全文，优先展示可信学术域名
+- **文件上传** — 支持 PDF、DOCX、PPTX、XLSX、TXT、MD、HTML 等（拖拽上传，最多 4 个文件）
+- **记忆系统** — 基于 SQLite 的对话存储，自动压缩记忆
+- **研究工具** — 每日摘要、研究洞察、今日论文、待办事项，日历视图管理
+- **Markdown 渲染** — 表格、数学公式（KaTeX）、代码块
+- **多会话管理** — 创建、重命名、删除、切换
 
 ### 快速开始
 
