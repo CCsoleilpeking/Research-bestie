@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useLocalStorage } from './hooks/useLocalStorage';
 import type { ChatMessage, ChatSession, DailySummaryItem, TodoItem, InsightItem, TodayPaper } from './types';
 import { genId } from './utils/id';
 import { generateChatTitle, getLLMConfig } from './utils/llm';
+import { fetchSessions, createSessionAPI, updateSessionAPI, deleteSessionAPI, fetchMessages, addMessageAPI, deleteMessagesAfterAPI, checkBackendHealth } from './utils/api';
 import DailySummary from './components/DailySummary';
 import TodoList from './components/TodoList';
 import InsightsList from './components/InsightsList';
@@ -20,34 +21,20 @@ import MarkdownEditor from './components/MarkdownEditor';
 import WelcomeBack from './components/WelcomeBack';
 import './App.css';
 
-function createSession(): ChatSession {
-  return { id: genId(), title: 'New Chat', messages: [], createdAt: new Date().toISOString() };
-}
-
-function migrateOrCreateSessions(): ChatSession[] {
-  try {
-    const old = localStorage.getItem('rb_chat');
-    if (old) {
-      const msgs: ChatMessage[] = JSON.parse(old);
-      if (msgs.length > 0) {
-        const session = createSession();
-        session.messages = msgs;
-        session.title = msgs[0]?.content.slice(0, 30) || 'New Chat';
-        localStorage.removeItem('rb_chat');
-        return [session];
-      }
-    }
-  } catch { /* ignore */ }
-  return [createSession()];
-}
-
 function App() {
+  // These stay in localStorage (not migrated to backend)
   const [dailySummaries, setDailySummaries] = useLocalStorage<DailySummaryItem[]>('rb_daily', []);
   const [todos, setTodos] = useLocalStorage<TodoItem[]>('rb_todos', []);
   const [insights, setInsights] = useLocalStorage<InsightItem[]>('rb_insights', []);
   const [todayPapers, setTodayPapers] = useLocalStorage<TodayPaper[]>('rb_today_papers', []);
-  const [sessions, setSessions] = useLocalStorage<ChatSession[]>('rb_sessions', migrateOrCreateSessions());
-  const [activeId, setActiveId] = useLocalStorage<string>('rb_active_chat', sessions[0]?.id || '');
+
+  // Sessions & messages: backend API (with localStorage fallback)
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [activeId, setActiveId] = useState<string>('');
+  const [activeMessages, setActiveMessages] = useState<ChatMessage[]>([]);
+  const [backendReady, setBackendReady] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const syncingRef = useRef(false);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedText, setSelectedText] = useState('');
@@ -60,33 +47,95 @@ function App() {
   const [summaryFlashSignal, setSummaryFlashSignal] = useState(0);
   const [insightsFlashSignal, setInsightsFlashSignal] = useState(0);
   const [papersFlashSignal, setPapersFlashSignal] = useState(0);
+  const [quotedText, setQuotedText] = useState('');
 
   const today = new Date().toISOString().slice(0, 10);
   const todayPapersFiltered = todayPapers.filter(p => p.addedAt.slice(0, 10) === today);
   const todayInsights = insights.filter(i => i.createdAt.slice(0, 10) === today);
 
+  // --- Initialize: load sessions from backend or create first session ---
   useEffect(() => {
-    if (todayPapersFiltered.length > 0 || todayInsights.length > 0) {
+    async function init() {
+      const healthy = await checkBackendHealth();
+      setBackendReady(healthy);
+
+      if (healthy) {
+        console.log('[App] Backend connected');
+        try {
+          const dbSessions = await fetchSessions();
+          if (dbSessions.length > 0) {
+            // Load sessions from DB, messages will be loaded on select
+            const sessionsWithMessages = dbSessions.map((s: ChatSession) => ({ ...s, messages: [] }));
+            setSessions(sessionsWithMessages);
+            setActiveId(dbSessions[0].id);
+            // Load messages for active session
+            const msgs = await fetchMessages(dbSessions[0].id);
+            setActiveMessages(msgs);
+          } else {
+            // No sessions in DB, create first one
+            const s = { id: genId(), title: 'New Chat', messages: [] as ChatMessage[], createdAt: new Date().toISOString() };
+            await createSessionAPI(s.id, s.title, s.createdAt);
+            setSessions([s]);
+            setActiveId(s.id);
+            setActiveMessages([]);
+          }
+        } catch (err) {
+          console.error('[App] Failed to load from backend:', err);
+          initFallback();
+        }
+      } else {
+        console.log('[App] Backend not available, using localStorage');
+        initFallback();
+      }
+      setLoading(false);
+    }
+
+    function initFallback() {
+      const stored = localStorage.getItem('rb_sessions');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        setSessions(parsed);
+        setActiveId(parsed[0]?.id || '');
+        setActiveMessages(parsed[0]?.messages || []);
+      } else {
+        const s = { id: genId(), title: 'New Chat', messages: [] as ChatMessage[], createdAt: new Date().toISOString() };
+        setSessions([s]);
+        setActiveId(s.id);
+        setActiveMessages([]);
+      }
+    }
+
+    init();
+  }, []);
+
+  // Welcome back
+  useEffect(() => {
+    if (!loading && (todayPapersFiltered.length > 0 || todayInsights.length > 0)) {
       setShowWelcome(true);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [loading]);
 
-  useEffect(() => {
-    if (!sessions.find(s => s.id === activeId)) {
-      if (sessions.length > 0) {
-        setActiveId(sessions[0].id);
-      } else {
-        const s = createSession();
-        setSessions([s]);
-        setActiveId(s.id);
+  // --- Load messages when switching session ---
+  const handleSelectSession = useCallback(async (id: string) => {
+    setActiveId(id);
+    setOverlayPanel(null);
+    if (backendReady) {
+      try {
+        const msgs = await fetchMessages(id);
+        setActiveMessages(msgs);
+      } catch (err) {
+        console.error('[App] Failed to load messages:', err);
+        const session = sessions.find(s => s.id === id);
+        setActiveMessages(session?.messages || []);
       }
+    } else {
+      const session = sessions.find(s => s.id === id);
+      setActiveMessages(session?.messages || []);
     }
-  }, [sessions, activeId, setActiveId, setSessions]);
+  }, [backendReady, sessions]);
 
-  const activeSession = sessions.find(s => s.id === activeId);
-  const activeMessages = activeSession?.messages || [];
-
+  // --- Popup close ---
   useEffect(() => {
     function handleClick() { setShowPopup(false); }
     if (showPopup) {
@@ -128,35 +177,59 @@ function App() {
     setSelectedText('');
   }
 
-  function handleNewSession() {
-    const s = createSession();
+  // --- Session CRUD ---
+  async function handleNewSession() {
+    const s: ChatSession = { id: genId(), title: 'New Chat', messages: [], createdAt: new Date().toISOString() };
     setSessions(prev => [s, ...prev]);
     setActiveId(s.id);
+    setActiveMessages([]);
+    if (backendReady) {
+      try { await createSessionAPI(s.id, s.title, s.createdAt); } catch (err) { console.error('[App] Create session error:', err); }
+    }
   }
 
-  function handleDeleteSession(id: string) {
+  async function handleDeleteSession(id: string) {
     setSessions(prev => {
       const next = prev.filter(s => s.id !== id);
       if (next.length === 0) {
-        const s = createSession();
+        const s: ChatSession = { id: genId(), title: 'New Chat', messages: [], createdAt: new Date().toISOString() };
         next.push(s);
         setActiveId(s.id);
+        setActiveMessages([]);
+        if (backendReady) { createSessionAPI(s.id, s.title, s.createdAt).catch(console.error); }
       } else if (id === activeId) {
         setActiveId(next[0].id);
+        if (backendReady) { fetchMessages(next[0].id).then(setActiveMessages).catch(console.error); }
+        else { setActiveMessages(next[0].messages || []); }
       }
       return next;
     });
+    if (backendReady) {
+      try { await deleteSessionAPI(id); } catch (err) { console.error('[App] Delete session error:', err); }
+    }
   }
 
-  function handleRenameSession(id: string, title: string) {
+  async function handleRenameSession(id: string, title: string) {
     setSessions(prev => prev.map(s => s.id === id ? { ...s, title } : s));
+    if (backendReady) {
+      try { await updateSessionAPI(id, { title }); } catch (err) { console.error('[App] Rename error:', err); }
+    }
   }
 
   function handleArchiveSession(id: string) {
     setSessions(prev => prev.map(s => s.id === id ? { ...s, archived: !s.archived } : s));
+    if (backendReady) {
+      const session = sessions.find(s => s.id === id);
+      updateSessionAPI(id, { archived: !session?.archived }).catch(console.error);
+    }
   }
 
-  function handleMessagesChange(messages: ChatMessage[]) {
+  // --- Messages change ---
+  async function handleMessagesChange(messages: ChatMessage[]) {
+    const prevMessages = activeMessages;
+    setActiveMessages(messages);
+
+    // Update session in state
     const currentSession = sessions.find(s => s.id === activeId);
     const needsTitle = currentSession?.title === 'New Chat' && messages.length > 0;
     const firstUser = needsTitle ? messages.find(m => m.role === 'user') : null;
@@ -166,17 +239,54 @@ function App() {
       return { ...s, messages };
     }));
 
-    // Generate title asynchronously with LLM
+    // Sync new messages to backend (fire and forget, no lock)
+    if (backendReady) {
+      const prevIds = new Set(prevMessages.map(m => m.id));
+      const newMsgs = messages.filter(m => !prevIds.has(m.id));
+
+      // If messages were deleted (edit+resend), sync deletions first
+      if (messages.length < prevMessages.length) {
+        const currentIds = new Set(messages.map(m => m.id));
+        const deletedMsg = prevMessages.find(m => !currentIds.has(m.id));
+        if (deletedMsg) {
+          deleteMessagesAfterAPI(activeId, deletedMsg.timestamp).catch(err => console.error('[App] Delete sync error:', err));
+        }
+      }
+
+      // Add new messages
+      for (const msg of newMsgs) {
+        addMessageAPI(activeId, { id: msg.id, role: msg.role, content: msg.content, timestamp: msg.timestamp })
+          .catch(err => console.error('[App] Add message sync error:', err));
+      }
+    }
+
+    // Generate title asynchronously
     if (firstUser) {
       const config = getLLMConfig();
       generateChatTitle(firstUser.content, config).then(title => {
         setSessions(prev => prev.map(s => {
           if (s.id !== activeId) return s;
-          if (s.title !== 'New Chat') return s; // already renamed
+          if (s.title !== 'New Chat') return s;
           return { ...s, title };
         }));
+        if (backendReady) { updateSessionAPI(activeId, { title }).catch(console.error); }
       });
     }
+  }
+
+  // --- Fallback: save to localStorage when backend not available ---
+  useEffect(() => {
+    if (!backendReady && sessions.length > 0) {
+      localStorage.setItem('rb_sessions', JSON.stringify(sessions));
+    }
+  }, [sessions, backendReady]);
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-dark-600">
+        <div className="text-gray-400">Loading...</div>
+      </div>
+    );
   }
 
   return (
@@ -210,7 +320,7 @@ function App() {
           <ChatSessionList
             sessions={sessions}
             activeId={activeId}
-            onSelect={(id) => { setActiveId(id); setOverlayPanel(null); }}
+            onSelect={handleSelectSession}
             onNew={handleNewSession}
             onDelete={handleDeleteSession}
             onRename={handleRenameSession}
@@ -235,6 +345,8 @@ function App() {
           onSave={(text, target) => handleSaveToModule(target, text)}
           onNewChat={handleNewSession}
           sessionId={activeId}
+          quotedText={quotedText}
+          onQuoteClear={() => setQuotedText('')}
         />
 
         {overlayPanel === 'insights' && !editingInsightId && (
@@ -291,6 +403,7 @@ function App() {
           selectedText={selectedText}
           position={popupPosition}
           onSave={handleSaveToModule}
+          onQuote={(text) => { setQuotedText(text); setShowPopup(false); }}
           onClose={() => setShowPopup(false)}
         />
       )}

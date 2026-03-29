@@ -14,6 +14,8 @@ interface Props {
   onSave: (text: string, target: 'summary' | 'insight') => void;
   onNewChat: () => void;
   sessionId?: string;
+  quotedText?: string;
+  onQuoteClear?: () => void;
 }
 
 function HighlightText({ text, query, activeIndex, startIndex }: { text: string; query: string; activeIndex: number; startIndex: number }) {
@@ -41,7 +43,7 @@ function countMatches(text: string, query: string): number {
   return (text.match(new RegExp(escaped, 'gi')) || []).length;
 }
 
-export default function ChatPanel({ messages, onChange, onSelectText, onSave, onNewChat, sessionId }: Props) {
+export default function ChatPanel({ messages, onChange, onSelectText, onSave, onNewChat, sessionId, quotedText, onQuoteClear }: Props) {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [streamingContent, setStreamingContent] = useState('');
@@ -56,9 +58,14 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
   const [loadingHint, setLoadingHint] = useState('');
   const loadingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const usedHintsRef = useRef<Set<number>>(new Set());
-  const [uploadedFile, setUploadedFile] = useState<{ filename: string; contentText: string; docId: string } | null>(null);
+  const [uploadedFiles, setUploadedFiles] = useState<{ filename: string; contentText: string; docId: string }[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const MAX_FILES = 4;
+  const MAX_SIZE_MB = 10;
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -130,6 +137,30 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }, [activeMatchIndex, searchQuery, totalMatches]);
 
+  // Auto-resize textarea when input changes
+  useEffect(() => {
+    if (inputRef.current) {
+      inputRef.current.style.height = 'auto';
+      inputRef.current.style.height = Math.min(inputRef.current.scrollHeight, 200) + 'px';
+    }
+  }, [input]);
+
+  // Fill input with quoted text and position cursor after quote
+  useEffect(() => {
+    if (quotedText) {
+      const quote = `${quotedText}\n\n`;
+      setInput(quote);
+      onQuoteClear?.();
+      setTimeout(() => {
+        if (inputRef.current) {
+          inputRef.current.focus();
+          inputRef.current.selectionStart = quote.length;
+          inputRef.current.selectionEnd = quote.length;
+        }
+      }, 50);
+    }
+  }, [quotedText, onQuoteClear]);
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, streamingContent]);
@@ -146,23 +177,32 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
     if (!text || loading) return;
     console.log('[Chat] User sending:', text.slice(0, 100));
 
-    // If file is uploaded, prepend file content to user message
-    let msgContent = text;
-    if (uploadedFile) {
-      msgContent = `[Uploaded file: ${uploadedFile.filename}, doc_id: ${uploadedFile.docId}]\n\n${uploadedFile.contentText.slice(0, 30000)}\n\n---\nUser question: ${text}`;
-      setUploadedFile(null);
+    // If files uploaded, display filenames but send content to LLM
+    let displayContent = text;
+    let llmContent = text;
+    if (uploadedFiles.length > 0) {
+      const fileNames = uploadedFiles.map(f => `📎 ${truncateFilename(f.filename)}`).join('\n');
+      displayContent = `${fileNames}\n\n${text}`;
+      const fileContents = uploadedFiles.map((f, i) =>
+        `[File ${i + 1}: ${f.filename}, doc_id: ${f.docId}]\n${f.contentText.slice(0, 30000)}`
+      ).join('\n\n---\n\n');
+      llmContent = `${fileContents}\n\n---\nUser question: ${text}`;
+      setUploadedFiles([]);
     }
 
-    const userMsg: ChatMessage = { id: genId(), role: 'user', content: msgContent, timestamp: new Date().toISOString() };
+    const userMsg: ChatMessage = { id: genId(), role: 'user', content: displayContent, timestamp: new Date().toISOString() };
+    // For LLM, replace user message content with full file content
+    const llmMessages = [...messages, { ...userMsg, content: llmContent }];
     const newMessages = [...messages, userMsg];
     onChange(newMessages);
     setInput('');
+    if (inputRef.current) inputRef.current.style.height = '42px';
     setLoading(true);
     setStreamingContent('');
     try {
       const config = getLLMConfig();
       console.log('[Chat] Config:', { provider: config.provider, model: config.model, hasKey: !!config.apiKey });
-      const response = await sendChatMessage(newMessages, config, (chunk) => { setStreamingContent(chunk); }, sessionId);
+      const response = await sendChatMessage(llmMessages, config, (chunk) => { setStreamingContent(chunk); }, sessionId);
       console.log('[Chat] Response received, length:', response.length);
       onChange([...newMessages, { id: genId(), role: 'assistant', content: response, timestamp: new Date().toISOString() }]);
     } catch (err) {
@@ -216,9 +256,26 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
     }
   }
 
-  async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  function truncateFilename(name: string, max = 20): string {
+    if (name.length <= max) return name;
+    const ext = name.lastIndexOf('.') >= 0 ? name.slice(name.lastIndexOf('.')) : '';
+    const base = name.slice(0, name.lastIndexOf('.') >= 0 ? name.lastIndexOf('.') : name.length);
+    return base.slice(0, max - ext.length - 3) + '...' + ext;
+  }
+
+  async function uploadSingleFile(file: File) {
+    // Size check
+    if (file.size > MAX_SIZE_MB * 1024 * 1024) {
+      setUploadError(`File "${truncateFilename(file.name)}" is too large (max ${MAX_SIZE_MB}MB)`);
+      return;
+    }
+    // Count check
+    if (uploadedFiles.length >= MAX_FILES) {
+      setUploadError(`Maximum ${MAX_FILES} files allowed`);
+      return;
+    }
+
+    setUploadError('');
     setUploading(true);
     try {
       const formData = new FormData();
@@ -237,19 +294,41 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
 
       const data = await response.json();
       console.log('[Chat] File uploaded:', data.filename, data.contentLength, 'chars');
-      setUploadedFile({ filename: data.filename, contentText: data.contentText, docId: data.docId });
+      setUploadedFiles(prev => [...prev, { filename: data.filename, contentText: data.contentText, docId: data.docId }]);
     } catch (err) {
       console.error('[Chat] Upload error:', err);
-      const errorMsg: ChatMessage = {
-        id: genId(), role: 'assistant',
-        content: `Error uploading file: ${err instanceof Error ? err.message : 'Unknown error'}`,
-        timestamp: new Date().toISOString(),
-      };
-      onChange([...messages, errorMsg]);
+      setUploadError(`Upload failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
     } finally {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
+  }
+
+  async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = e.target.files;
+    if (!files) return;
+    for (let i = 0; i < files.length; i++) {
+      await uploadSingleFile(files[i]);
+    }
+  }
+
+  function handleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setDragOver(false);
+    const files = e.dataTransfer.files;
+    for (let i = 0; i < files.length; i++) {
+      uploadSingleFile(files[i]);
+    }
+  }
+
+  function handleDragOver(e: React.DragEvent) {
+    e.preventDefault();
+    setDragOver(true);
+  }
+
+  function handleDragLeave(e: React.DragEvent) {
+    e.preventDefault();
+    setDragOver(false);
   }
 
   let globalMatchIndex = 0;
@@ -446,52 +525,85 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
       </div>
 
       {/* Input */}
-      <div className="px-4 py-3 bg-dark-200 border-t border-dark-50/30">
-        {/* File upload indicator */}
-        {uploadedFile && (
-          <div className="flex items-center gap-2 mb-2 px-3 py-1.5 bg-mint-400/10 border border-mint-400/20 rounded-lg text-xs text-mint-400">
-            <span>📎 {uploadedFile.filename}</span>
-            <button onClick={() => setUploadedFile(null)} className="text-gray-500 hover:text-white">&times;</button>
-          </div>
-        )}
-        {uploading && (
-          <div className="flex items-center gap-2 mb-2 px-3 py-1.5 text-xs text-gray-400">
-            <span>Uploading...</span>
-          </div>
-        )}
-        <div className="flex gap-2">
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".pdf,.docx,.pptx,.xlsx,.odt,.odp,.ods,.rtf,.txt,.md,.html,.htm,.csv"
-            onChange={handleFileUpload}
-            className="hidden"
-          />
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            disabled={loading || uploading}
-            className="text-gray-500 hover:text-mint-400 px-2 py-2.5 text-lg disabled:opacity-30 transition-colors"
-            title="Upload file"
-          >
-            📎
-          </button>
-          <input
+      <div className="px-4 py-3 bg-dark-500">
+        <div
+          className={`bg-dark-300 rounded-2xl border ${dragOver ? 'border-mint-400' : 'border-dark-50/30'} p-3 flex flex-col`}
+          onDrop={handleDrop}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+        >
+          {/* File tags + errors inside the box */}
+          {uploadedFiles.length > 0 && (
+            <div className="flex flex-wrap gap-2 mb-2">
+              {uploadedFiles.map((f, i) => (
+                <div key={i} className="flex items-center gap-1.5 px-2.5 py-1 bg-mint-400/10 border border-mint-400/20 rounded-lg text-xs text-mint-400">
+                  <span>📎 {truncateFilename(f.filename)}</span>
+                  <button onClick={() => setUploadedFiles(prev => prev.filter((_, j) => j !== i))} className="text-gray-500 hover:text-white text-sm">&times;</button>
+                </div>
+              ))}
+            </div>
+          )}
+          {uploading && (
+            <div className="text-xs text-gray-400 mb-2">Uploading...</div>
+          )}
+          {uploadError && (
+            <div className="flex items-center gap-2 mb-2 text-xs text-red-400">
+              <span>{uploadError}</span>
+              <button onClick={() => setUploadError('')} className="text-gray-500 hover:text-white">&times;</button>
+            </div>
+          )}
+          {dragOver && (
+            <div className="text-center py-2 mb-2 text-xs text-mint-400">Drop files here</div>
+          )}
+
+          {/* Textarea */}
+          <textarea
+            ref={inputRef}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value);
+              e.target.style.height = 'auto';
+              e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px';
+            }}
             onCompositionStart={() => { isComposingRef.current = true; }}
             onCompositionEnd={() => { isComposingRef.current = false; }}
-            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !isComposingRef.current) handleSend(); }}
-            placeholder={uploadedFile ? "Ask about the uploaded file..." : "Enter paper title or research question..."}
-            className="flex-1 border border-dark-50/30 rounded-xl px-4 py-2.5 text-sm bg-dark-400 text-white placeholder-gray-600 focus:ring-2 focus:ring-mint-400/30 focus:border-transparent focus:outline-none"
+            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !isComposingRef.current) { e.preventDefault(); handleSend(); } }}
+            placeholder={uploadedFiles.length > 0 ? "Ask about the uploaded files..." : "Enter paper title or research question..."}
+            className="w-full bg-transparent text-sm text-white placeholder-gray-600 focus:outline-none resize-none overflow-y-auto"
+            style={{ minHeight: '24px', maxHeight: '200px' }}
+            rows={1}
             disabled={loading}
           />
-          <button
-            onClick={handleSend}
-            disabled={loading || !input.trim()}
-            className="bg-gradient-to-r from-mint-300 to-mint-600 text-dark-600 px-5 py-2.5 rounded-xl text-sm font-semibold hover:opacity-90 disabled:opacity-30 disabled:cursor-not-allowed transition-opacity"
-          >
-            Send
-          </button>
+
+          {/* Bottom bar: attach left, send right */}
+          <div className="flex items-center justify-between mt-2">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".pdf,.docx,.pptx,.xlsx,.odt,.odp,.ods,.rtf,.txt,.md,.html,.htm,.csv"
+              onChange={handleFileUpload}
+              multiple
+              className="hidden"
+            />
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={loading || uploading || uploadedFiles.length >= MAX_FILES}
+              className="text-gray-500 hover:text-mint-400 text-lg disabled:opacity-30 transition-colors"
+              title={uploadedFiles.length >= MAX_FILES ? `Maximum ${MAX_FILES} files` : 'Upload file'}
+            >
+              📎
+            </button>
+            <button
+              onClick={handleSend}
+              disabled={loading || !input.trim()}
+              className="w-8 h-8 flex items-center justify-center rounded-full bg-gradient-to-r from-mint-300 to-mint-600 text-dark-600 disabled:opacity-30 disabled:cursor-not-allowed transition-opacity hover:opacity-90"
+              title="Send"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 10.5L12 3m0 0l7.5 7.5M12 3v18" />
+              </svg>
+            </button>
+          </div>
         </div>
       </div>
     </div>

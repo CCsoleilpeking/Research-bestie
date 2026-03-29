@@ -50,6 +50,27 @@ export async function searchExa({ query, type = 'auto', numResults = 5 }) {
   };
 }
 
+export async function crawlExa(url) {
+  if (!url) throw new Error('URL is required');
+
+  console.log(`[Exa] Crawling: ${url}`);
+  const mcpClient = await getClient();
+
+  const result = await mcpClient.callTool({
+    name: 'crawling_exa',
+    arguments: { url },
+  });
+
+  const content = result.content || [];
+  const text = content
+    .filter(c => c.type === 'text')
+    .map(c => c.text)
+    .join('\n');
+
+  console.log(`[Exa] Crawled ${text.length} chars`);
+  return text;
+}
+
 function parseSearchResults(text) {
   // Try to parse structured results from the text
   const results = [];

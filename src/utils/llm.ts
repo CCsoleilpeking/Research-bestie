@@ -158,7 +158,12 @@ function sanitizeApiKey(key: string): string {
 
 const BACKEND_URL = 'http://localhost:3001';
 
-async function sendViaBackend(messages: ChatMessage[], config: LLMConfig, sessionId?: string): Promise<string | null> {
+async function sendViaBackend(
+  messages: ChatMessage[],
+  config: LLMConfig,
+  sessionId?: string,
+  onChunk?: (chunk: string) => void
+): Promise<string | null> {
   try {
     const response = await fetch(`${BACKEND_URL}/api/chat`, {
       method: 'POST',
@@ -178,16 +183,87 @@ async function sendViaBackend(messages: ChatMessage[], config: LLMConfig, sessio
       return null;
     }
 
-    const data = await response.json();
-    if (data.searched) {
-      log(`[Backend] Search was triggered for: "${data.searchQuery}"`);
+    // Read SSE stream — parse event/data pairs from raw text
+    const reader = response.body?.getReader();
+    if (!reader) return null;
+
+    const decoder = new TextDecoder();
+    let rawBuffer = '';
+    let full = '';
+    let finalContent = '';
+    let pendingText = '';
+    let typewriterDone = false;
+
+    // Typewriter: flush pendingText char by char
+    const typewriterInterval = setInterval(() => {
+      if (pendingText.length > 0) {
+        // Flush up to 5 chars at a time for speed
+        const chars = Math.min(5, pendingText.length);
+        full += pendingText.slice(0, chars);
+        pendingText = pendingText.slice(chars);
+        if (onChunk) onChunk(full);
+      } else if (typewriterDone) {
+        clearInterval(typewriterInterval);
+      }
+    }, 15);
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      rawBuffer += decoder.decode(value, { stream: true });
+
+      // SSE messages are separated by double newlines
+      const messages = rawBuffer.split('\n\n');
+      rawBuffer = messages.pop() || ''; // Keep incomplete message in buffer
+
+      for (const msg of messages) {
+        if (!msg.trim()) continue;
+        const lines = msg.split('\n');
+        let eventType = '';
+        let dataStr = '';
+
+        for (const line of lines) {
+          if (line.startsWith('event: ')) eventType = line.slice(7).trim();
+          else if (line.startsWith('data: ')) dataStr = line.slice(6);
+        }
+
+        if (!eventType || !dataStr) continue;
+
+        try {
+          const data = JSON.parse(dataStr);
+          if (eventType === 'chunk') {
+            // Queue content for typewriter animation
+            pendingText += data.content;
+          } else if (eventType === 'done') {
+            finalContent = data.content;
+          } else if (eventType === 'error') {
+            throw new Error(data.error);
+          } else if (eventType === 'status') {
+            log(`[Backend] Status: ${data.type}`, data.query || '');
+          }
+        } catch (e) {
+          if (e instanceof Error && e.message.startsWith('Unexpected')) continue;
+          throw e;
+        }
+      }
     }
-    if (data.recalled) {
-      log('[Backend] Memory recall was triggered');
-    }
-    return data.content;
+
+    // Wait for typewriter to finish flushing
+    typewriterDone = true;
+    await new Promise<void>(resolve => {
+      const check = setInterval(() => {
+        if (pendingText.length === 0) {
+          clearInterval(check);
+          clearInterval(typewriterInterval);
+          resolve();
+        }
+      }, 20);
+    });
+
+    return finalContent || full;
   } catch (err) {
-    log('[Backend] Not available, falling back to direct LLM call');
+    log('[Backend] Not available or error, falling back to direct LLM call:', err);
     return null;
   }
 }
@@ -208,14 +284,12 @@ export async function sendChatMessage(
   const startTime = performance.now();
 
   try {
-    // Try backend first (has search + memory capability)
-    if (!onChunk) {
-      const backendResult = await sendViaBackend(messages, config, sessionId);
-      if (backendResult !== null) {
-        const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
-        log(`[Backend] Response received in ${elapsed}s, length=${backendResult.length}`);
-        return backendResult;
-      }
+    // Try backend first (has search + memory + streaming capability)
+    const backendResult = await sendViaBackend(messages, config, sessionId, onChunk);
+    if (backendResult !== null) {
+      const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
+      log(`[Backend] Response received in ${elapsed}s, length=${backendResult.length}`);
+      return backendResult;
     }
 
     // Fallback: direct LLM call (no search capability)

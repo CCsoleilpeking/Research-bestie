@@ -91,7 +91,7 @@ export function getMessages(sessionId) {
 }
 
 export function addMessage(id, sessionId, role, content, timestamp) {
-  db.prepare('INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)').run(id, sessionId, role, content, timestamp);
+  db.prepare('INSERT OR IGNORE INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)').run(id, sessionId, role, content, timestamp);
 }
 
 export function updateMessage(id, content) {
