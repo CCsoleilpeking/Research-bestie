@@ -53,6 +53,9 @@ function App() {
   const [summaryFlashSignal, setSummaryFlashSignal] = useState(0);
   const [insightsFlashSignal, setInsightsFlashSignal] = useState(0);
   const [papersFlashSignal, setPapersFlashSignal] = useState(0);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(360);
+  const [isResizing, setIsResizing] = useState(false);
   const [quotedText, setQuotedText] = useState('');
 
   const today = new Date().toISOString().slice(0, 10);
@@ -359,6 +362,27 @@ function App() {
     setTodayPapers(newPapers);
   }
 
+  // Sidebar resize handlers — must be before any conditional return
+  useEffect(() => {
+    if (!isResizing) return;
+    function onMouseMove(e: MouseEvent) {
+      setSidebarWidth(Math.max(240, Math.min(600, e.clientX)));
+    }
+    function onMouseUp() {
+      setIsResizing(false);
+    }
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    return () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+  }, [isResizing]);
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-dark-600">
@@ -370,49 +394,79 @@ function App() {
   return (
     <div className="min-h-screen flex bg-dark-600">
       {/* Left Sidebar */}
-      <div className="w-[360px] bg-dark-400 border-r border-dark-50/30 flex flex-col h-screen">
-        {/* Sidebar Header */}
-        <div className="px-4 py-4 bg-dark-200 border-b border-dark-50/30 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className="text-2xl">📚</span>
-            <div>
-              <h1 className="font-bold text-lg text-white">ResearchBestie</h1>
-              <p className="text-xs text-gray-500">Your research companion</p>
+      {!sidebarCollapsed && (
+        <div className="bg-dark-400 border-r border-dark-50/30 flex flex-col h-screen shrink-0 relative" style={{ width: sidebarWidth }}>
+          {/* Sidebar Header */}
+          <div className="px-4 py-4 bg-dark-200 border-b border-dark-50/30 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="text-2xl">📚</span>
+              <div>
+                <h1 className="font-bold text-lg text-white">ResearchBestie</h1>
+                <p className="text-xs text-gray-500">Your research companion</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setSettingsOpen(true)}
+                className="text-gray-500 hover:text-mint-400 flex flex-col items-center gap-0.5"
+                title="Settings"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+                <span className="text-[10px] text-gray-500">setup LLM</span>
+              </button>
+              <button
+                onClick={() => setSidebarCollapsed(true)}
+                className="text-mint-400 hover:text-mint-300 text-xl font-bold"
+                title="Collapse sidebar"
+              >
+                &laquo;
+              </button>
             </div>
           </div>
+
+          {/* Scrollable content */}
+          <div className="flex-1 overflow-y-auto p-3">
+            <ChatSessionList
+              sessions={sessions}
+              activeId={activeId}
+              onSelect={handleSelectSession}
+              onNew={handleNewSession}
+              onDelete={handleDeleteSession}
+              onRename={handleRenameSession}
+            />
+            <div className="border-t border-dark-50/20 my-3" />
+            <InsightsList items={insights} onChange={handleInsightsChange} onShowPanel={() => { setOverlayPanel('insights'); setSummaryCloseSignal(s => s + 1); }} flashSignal={insightsFlashSignal} />
+            <div className="border-t border-dark-50/20 my-3" />
+            <DailySummary items={dailySummaries} onChange={handleDailySummariesChange} insights={insights} onChangeInsights={handleInsightsChange} todayPapers={todayPapers} todos={todos} onPanelOpen={() => { setOverlayPanel(null); setEditingInsightId(null); }} closeSignal={summaryCloseSignal} flashSignal={summaryFlashSignal} />
+            <div className="border-t border-dark-50/20 my-3" />
+            <TodoList items={todos} onChange={handleTodosChange} />
+            <div className="border-t border-dark-50/20 my-3" />
+            <TodayPapers items={todayPapers} onChange={handleTodayPapersChange} flashSignal={papersFlashSignal} />
+          </div>
+
+          {/* Resize handle */}
+          <div
+            className="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-mint-400/30 active:bg-mint-400/50 z-10"
+            onMouseDown={() => setIsResizing(true)}
+          />
+        </div>
+      )}
+
+      {/* Expand button when collapsed */}
+      {sidebarCollapsed && (
+        <div className="h-screen flex items-start pt-4 bg-dark-400 border-r border-dark-50/30">
           <button
-            onClick={() => setSettingsOpen(true)}
-            className="text-gray-500 hover:text-mint-400 flex flex-col items-center gap-0.5"
-            title="Settings"
+            onClick={() => setSidebarCollapsed(false)}
+            className="text-mint-400 hover:text-mint-300 px-2 py-2 text-xl font-bold"
+            title="Expand sidebar"
           >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-            </svg>
-            <span className="text-[10px] text-gray-500">setup LLM</span>
+            &raquo;
           </button>
         </div>
-
-        {/* Scrollable content */}
-        <div className="flex-1 overflow-y-auto p-3">
-          <ChatSessionList
-            sessions={sessions}
-            activeId={activeId}
-            onSelect={handleSelectSession}
-            onNew={handleNewSession}
-            onDelete={handleDeleteSession}
-            onRename={handleRenameSession}
-          />
-          <div className="border-t border-dark-50/20 my-3" />
-          <InsightsList items={insights} onChange={handleInsightsChange} onShowPanel={() => { setOverlayPanel('insights'); setSummaryCloseSignal(s => s + 1); }} flashSignal={insightsFlashSignal} />
-          <div className="border-t border-dark-50/20 my-3" />
-          <DailySummary items={dailySummaries} onChange={handleDailySummariesChange} insights={insights} onChangeInsights={handleInsightsChange} todayPapers={todayPapers} todos={todos} onPanelOpen={() => { setOverlayPanel(null); setEditingInsightId(null); }} closeSignal={summaryCloseSignal} flashSignal={summaryFlashSignal} />
-          <div className="border-t border-dark-50/20 my-3" />
-          <TodoList items={todos} onChange={handleTodosChange} />
-          <div className="border-t border-dark-50/20 my-3" />
-          <TodayPapers items={todayPapers} onChange={handleTodayPapersChange} flashSignal={papersFlashSignal} />
-        </div>
-      </div>
+      )}
 
       {/* Right Chat Panel */}
       <div className="flex-1 h-screen relative">
