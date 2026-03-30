@@ -1,9 +1,15 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { useLocalStorage } from './hooks/useLocalStorage';
 import type { ChatMessage, ChatSession, DailySummaryItem, TodoItem, InsightItem, TodayPaper } from './types';
 import { genId } from './utils/id';
 import { generateChatTitle, getLLMConfig } from './utils/llm';
-import { fetchSessions, createSessionAPI, updateSessionAPI, deleteSessionAPI, fetchMessages, addMessageAPI, deleteMessagesAfterAPI, checkBackendHealth } from './utils/api';
+import {
+  fetchSessions, createSessionAPI, updateSessionAPI, deleteSessionAPI,
+  fetchMessages, addMessageAPI, deleteMessagesAfterAPI, checkBackendHealth,
+  fetchDailySummaries, upsertDailySummaryAPI, deleteDailySummaryAPI,
+  fetchInsights, addInsightAPI, updateInsightAPI, deleteInsightAPI,
+  fetchTodayPapers, addTodayPaperAPI, deleteTodayPaperAPI,
+  fetchTodos, addTodoAPI, updateTodoAPI, deleteTodoAPI,
+} from './utils/api';
 import DailySummary from './components/DailySummary';
 import TodoList from './components/TodoList';
 import InsightsList from './components/InsightsList';
@@ -22,11 +28,11 @@ import WelcomeBack from './components/WelcomeBack';
 import './App.css';
 
 function App() {
-  // These stay in localStorage (not migrated to backend)
-  const [dailySummaries, setDailySummaries] = useLocalStorage<DailySummaryItem[]>('rb_daily', []);
-  const [todos, setTodos] = useLocalStorage<TodoItem[]>('rb_todos', []);
-  const [insights, setInsights] = useLocalStorage<InsightItem[]>('rb_insights', []);
-  const [todayPapers, setTodayPapers] = useLocalStorage<TodayPaper[]>('rb_today_papers', []);
+  // All data from backend API
+  const [dailySummaries, setDailySummaries] = useState<DailySummaryItem[]>([]);
+  const [todos, setTodos] = useState<TodoItem[]>([]);
+  const [insights, setInsights] = useState<InsightItem[]>([]);
+  const [todayPapers, setTodayPapers] = useState<TodayPaper[]>([]);
 
   // Sessions & messages: backend API (with localStorage fallback)
   const [sessions, setSessions] = useState<ChatSession[]>([]);
@@ -62,23 +68,33 @@ function App() {
       if (healthy) {
         console.log('[App] Backend connected');
         try {
+          // Load sessions
           const dbSessions = await fetchSessions();
           if (dbSessions.length > 0) {
-            // Load sessions from DB, messages will be loaded on select
             const sessionsWithMessages = dbSessions.map((s: ChatSession) => ({ ...s, messages: [] }));
             setSessions(sessionsWithMessages);
             setActiveId(dbSessions[0].id);
-            // Load messages for active session
             const msgs = await fetchMessages(dbSessions[0].id);
             setActiveMessages(msgs);
           } else {
-            // No sessions in DB, create first one
             const s = { id: genId(), title: 'New Chat', messages: [] as ChatMessage[], createdAt: new Date().toISOString() };
             await createSessionAPI(s.id, s.title, s.createdAt);
             setSessions([s]);
             setActiveId(s.id);
             setActiveMessages([]);
           }
+
+          // Load all data from backend
+          const [summaries, ins, papers, todoItems] = await Promise.all([
+            fetchDailySummaries(),
+            fetchInsights(),
+            fetchTodayPapers(),
+            fetchTodos(),
+          ]);
+          setDailySummaries(summaries);
+          setInsights(ins);
+          setTodayPapers(papers.map((p: TodayPaper) => ({ ...p, addedAt: p.addedAt || (p as any).added_at })));
+          setTodos(todoItems.map((t: TodoItem) => ({ ...t, createdAt: t.createdAt || (t as any).created_at })));
         } catch (err) {
           console.error('[App] Failed to load from backend:', err);
           initFallback();
@@ -155,22 +171,33 @@ function App() {
     if (!text) return;
 
     if (target === 'paper') {
-      setTodayPapers(prev => [...prev, { id: genId(), title: text, addedAt: new Date().toISOString() }]);
+      const id = genId();
+      const addedAt = new Date().toISOString();
+      setTodayPapers(prev => [...prev, { id, title: text, addedAt }]);
       setPapersFlashSignal(s => s + 1);
+      if (backendReady) addTodayPaperAPI(id, text, addedAt).catch(console.error);
     } else if (target === 'summary') {
       const existing = dailySummaries.find(s => s.date === today);
       if (existing) {
         const frags = existing.fragments || (existing.content ? [existing.content] : []);
+        const newFrags = [...frags, text];
+        const newContent = newFrags.join('\n\n');
         setDailySummaries(dailySummaries.map(s =>
-          s.id === existing.id ? { ...s, content: [...frags, text].join('\n\n'), fragments: [...frags, text] } : s
+          s.id === existing.id ? { ...s, content: newContent, fragments: newFrags } : s
         ));
+        if (backendReady) upsertDailySummaryAPI(existing.id, today, newContent, newFrags).catch(console.error);
       } else {
-        setDailySummaries([{ id: genId(), date: today, content: text, fragments: [text] }, ...dailySummaries]);
+        const id = genId();
+        setDailySummaries([{ id, date: today, content: text, fragments: [text] }, ...dailySummaries]);
+        if (backendReady) upsertDailySummaryAPI(id, today, text, [text]).catch(console.error);
       }
       setSummaryFlashSignal(s => s + 1);
     } else if (target === 'insight') {
-      setInsights([{ id: genId(), content: text, createdAt: new Date().toISOString() }, ...insights]);
+      const id = genId();
+      const createdAt = new Date().toISOString();
+      setInsights([{ id, content: text, createdAt }, ...insights]);
       setInsightsFlashSignal(s => s + 1);
+      if (backendReady) addInsightAPI(id, text, createdAt).catch(console.error);
     }
 
     setShowPopup(false);
@@ -281,6 +308,57 @@ function App() {
     }
   }, [sessions, backendReady]);
 
+  // --- Sync wrappers for child component onChange ---
+  function handleInsightsChange(newInsights: InsightItem[]) {
+    if (backendReady) {
+      // Detect deletions
+      const newIds = new Set(newInsights.map(i => i.id));
+      insights.filter(i => !newIds.has(i.id)).forEach(i => deleteInsightAPI(i.id).catch(console.error));
+      // Detect additions
+      const oldIds = new Set(insights.map(i => i.id));
+      newInsights.filter(i => !oldIds.has(i.id)).forEach(i => addInsightAPI(i.id, i.content, i.createdAt).catch(console.error));
+      // Detect updates
+      newInsights.filter(i => oldIds.has(i.id)).forEach(i => {
+        const old = insights.find(o => o.id === i.id);
+        if (old && old.content !== i.content) updateInsightAPI(i.id, i.content).catch(console.error);
+      });
+    }
+    setInsights(newInsights);
+  }
+
+  function handleDailySummariesChange(newSummaries: DailySummaryItem[]) {
+    if (backendReady) {
+      const newIds = new Set(newSummaries.map(s => s.id));
+      dailySummaries.filter(s => !newIds.has(s.id)).forEach(s => deleteDailySummaryAPI(s.id).catch(console.error));
+      newSummaries.forEach(s => upsertDailySummaryAPI(s.id, s.date, s.content, s.fragments || []).catch(console.error));
+    }
+    setDailySummaries(newSummaries);
+  }
+
+  function handleTodosChange(newTodos: TodoItem[]) {
+    if (backendReady) {
+      const newIds = new Set(newTodos.map(t => t.id));
+      todos.filter(t => !newIds.has(t.id)).forEach(t => deleteTodoAPI(t.id).catch(console.error));
+      const oldIds = new Set(todos.map(t => t.id));
+      newTodos.filter(t => !oldIds.has(t.id)).forEach(t => addTodoAPI(t.id, t.text, t.createdAt).catch(console.error));
+      newTodos.filter(t => oldIds.has(t.id)).forEach(t => {
+        const old = todos.find(o => o.id === t.id);
+        if (old && (old.text !== t.text || old.done !== t.done)) updateTodoAPI(t.id, { text: t.text, done: t.done }).catch(console.error);
+      });
+    }
+    setTodos(newTodos);
+  }
+
+  function handleTodayPapersChange(newPapers: TodayPaper[]) {
+    if (backendReady) {
+      const newIds = new Set(newPapers.map(p => p.id));
+      todayPapers.filter(p => !newIds.has(p.id)).forEach(p => deleteTodayPaperAPI(p.id).catch(console.error));
+      const oldIds = new Set(todayPapers.map(p => p.id));
+      newPapers.filter(p => !oldIds.has(p.id)).forEach(p => addTodayPaperAPI(p.id, p.title, p.addedAt, p.link, p.notes).catch(console.error));
+    }
+    setTodayPapers(newPapers);
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-dark-600">
@@ -326,13 +404,13 @@ function App() {
             onRename={handleRenameSession}
           />
           <div className="border-t border-dark-50/20 my-3" />
-          <InsightsList items={insights} onChange={setInsights} onShowPanel={() => { setOverlayPanel('insights'); setSummaryCloseSignal(s => s + 1); }} flashSignal={insightsFlashSignal} />
+          <InsightsList items={insights} onChange={handleInsightsChange} onShowPanel={() => { setOverlayPanel('insights'); setSummaryCloseSignal(s => s + 1); }} flashSignal={insightsFlashSignal} />
           <div className="border-t border-dark-50/20 my-3" />
-          <DailySummary items={dailySummaries} onChange={setDailySummaries} insights={insights} onChangeInsights={setInsights} todayPapers={todayPapers} todos={todos} onPanelOpen={() => { setOverlayPanel(null); setEditingInsightId(null); }} closeSignal={summaryCloseSignal} flashSignal={summaryFlashSignal} />
+          <DailySummary items={dailySummaries} onChange={handleDailySummariesChange} insights={insights} onChangeInsights={handleInsightsChange} todayPapers={todayPapers} todos={todos} onPanelOpen={() => { setOverlayPanel(null); setEditingInsightId(null); }} closeSignal={summaryCloseSignal} flashSignal={summaryFlashSignal} />
           <div className="border-t border-dark-50/20 my-3" />
-          <TodoList items={todos} onChange={setTodos} />
+          <TodoList items={todos} onChange={handleTodosChange} />
           <div className="border-t border-dark-50/20 my-3" />
-          <TodayPapers items={todayPapers} onChange={setTodayPapers} flashSignal={papersFlashSignal} />
+          <TodayPapers items={todayPapers} onChange={handleTodayPapersChange} flashSignal={papersFlashSignal} />
         </div>
       </div>
 
@@ -358,7 +436,7 @@ function App() {
                     <span className="text-xs text-gray-600">{new Date(item.createdAt).toLocaleDateString()}</span>
                     <div className="flex gap-3">
                       <button onClick={() => setEditingInsightId(item.id)} className="text-xs text-gray-400 hover:text-mint-400">Edit</button>
-                      <button onClick={() => setInsights(insights.filter(i => i.id !== item.id))} className="text-xs text-gray-400 hover:text-red-400">Delete</button>
+                      <button onClick={() => handleInsightsChange(insights.filter(i => i.id !== item.id))} className="text-xs text-gray-400 hover:text-red-400">Delete</button>
                     </div>
                   </div>
                   <div className="prose prose-sm prose-invert max-w-none prose-headings:text-white prose-strong:text-white prose-code:text-gray-300 prose-a:text-gray-300">
@@ -378,7 +456,7 @@ function App() {
             <MarkdownEditor
               title="Editing Insight"
               value={item.content}
-              onSave={(v) => { setInsights(insights.map(i => i.id === editingInsightId ? { ...i, content: v } : i)); setEditingInsightId(null); }}
+              onSave={(v) => { handleInsightsChange(insights.map(i => i.id === editingInsightId ? { ...i, content: v } : i)); setEditingInsightId(null); }}
               onCancel={() => setEditingInsightId(null)}
             />
           );

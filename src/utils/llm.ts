@@ -156,7 +156,7 @@ function sanitizeApiKey(key: string): string {
   return key.replace(/[^\x20-\x7E]/g, '').trim();
 }
 
-const BACKEND_URL = 'http://localhost:3001';
+const BACKEND_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
 async function sendViaBackend(
   messages: ChatMessage[],
@@ -176,6 +176,8 @@ async function sendViaBackend(
         sessionId,
       }),
     });
+
+    log('[Backend] Response status:', response.status, response.headers.get('content-type'));
 
     if (!response.ok) {
       const err = await response.text();

@@ -53,9 +53,40 @@ db.exec(`
     FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE SET NULL
   );
 
+  CREATE TABLE IF NOT EXISTS daily_summaries (
+    id TEXT PRIMARY KEY,
+    date TEXT NOT NULL,
+    content TEXT NOT NULL DEFAULT '',
+    fragments TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS insights (
+    id TEXT PRIMARY KEY,
+    content TEXT NOT NULL,
+    source TEXT DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS today_papers (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    link TEXT DEFAULT '',
+    notes TEXT DEFAULT '',
+    added_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS todos (
+    id TEXT PRIMARY KEY,
+    text TEXT NOT NULL,
+    done INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
   CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
   CREATE INDEX IF NOT EXISTS idx_memory_session ON memory_summaries(session_id);
   CREATE INDEX IF NOT EXISTS idx_documents_session ON documents(session_id);
+  CREATE INDEX IF NOT EXISTS idx_daily_date ON daily_summaries(date);
 `);
 
 console.log('[DB] SQLite database initialized at', DB_PATH);
@@ -150,6 +181,87 @@ export function forgetSession(sessionId) {
   clearSessionMessages(sessionId);
   clearSummaries(sessionId);
   console.log(`[DB] Forgot all history for session ${sessionId}`);
+}
+
+// --- Daily Summaries ---
+export function getAllDailySummaries() {
+  const rows = db.prepare('SELECT * FROM daily_summaries ORDER BY date DESC').all();
+  return rows.map(r => ({ ...r, fragments: JSON.parse(r.fragments) }));
+}
+
+export function upsertDailySummary(id, date, content, fragments) {
+  db.prepare(`INSERT INTO daily_summaries (id, date, content, fragments) VALUES (?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET content = ?, fragments = ?`)
+    .run(id, date, content, JSON.stringify(fragments), content, JSON.stringify(fragments));
+}
+
+export function deleteDailySummary(id) {
+  db.prepare('DELETE FROM daily_summaries WHERE id = ?').run(id);
+}
+
+// --- Insights ---
+export function getAllInsights() {
+  return db.prepare('SELECT * FROM insights ORDER BY created_at DESC').all();
+}
+
+export function addInsight(id, content, createdAt) {
+  db.prepare('INSERT OR IGNORE INTO insights (id, content, created_at) VALUES (?, ?, ?)').run(id, content, createdAt);
+}
+
+export function updateInsight(id, content) {
+  db.prepare('UPDATE insights SET content = ? WHERE id = ?').run(content, id);
+}
+
+export function deleteInsight(id) {
+  db.prepare('DELETE FROM insights WHERE id = ?').run(id);
+}
+
+// --- Today Papers ---
+export function getAllTodayPapers() {
+  return db.prepare('SELECT * FROM today_papers ORDER BY added_at DESC').all();
+}
+
+export function addTodayPaper(id, title, addedAt, link, notes) {
+  db.prepare('INSERT OR IGNORE INTO today_papers (id, title, added_at, link, notes) VALUES (?, ?, ?, ?, ?)')
+    .run(id, title, addedAt, link || '', notes || '');
+}
+
+export function updateTodayPaper(id, data) {
+  const fields = [];
+  const values = [];
+  if (data.title !== undefined) { fields.push('title = ?'); values.push(data.title); }
+  if (data.link !== undefined) { fields.push('link = ?'); values.push(data.link); }
+  if (data.notes !== undefined) { fields.push('notes = ?'); values.push(data.notes); }
+  if (fields.length === 0) return;
+  values.push(id);
+  db.prepare(`UPDATE today_papers SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+}
+
+export function deleteTodayPaper(id) {
+  db.prepare('DELETE FROM today_papers WHERE id = ?').run(id);
+}
+
+// --- Todos ---
+export function getAllTodos() {
+  return db.prepare('SELECT * FROM todos ORDER BY created_at DESC').all();
+}
+
+export function addTodo(id, text, createdAt) {
+  db.prepare('INSERT OR IGNORE INTO todos (id, text, created_at) VALUES (?, ?, ?)').run(id, text, createdAt);
+}
+
+export function updateTodo(id, data) {
+  const fields = [];
+  const values = [];
+  if (data.text !== undefined) { fields.push('text = ?'); values.push(data.text); }
+  if (data.done !== undefined) { fields.push('done = ?'); values.push(data.done ? 1 : 0); }
+  if (fields.length === 0) return;
+  values.push(id);
+  db.prepare(`UPDATE todos SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+}
+
+export function deleteTodo(id) {
+  db.prepare('DELETE FROM todos WHERE id = ?').run(id);
 }
 
 export default db;

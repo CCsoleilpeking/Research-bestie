@@ -7,8 +7,9 @@ import { searchExa, crawlExa } from './tools/exa-search.mjs';
 import { sortByTrust } from './tools/trusted-domains.mjs';
 import sessionRoutes from './routes/sessions.mjs';
 import uploadRoutes from './routes/upload.mjs';
-import {
-  getMessages, addMessage, getMessageCount,
+import dataRoutes from './routes/data.mjs';
+import db, {
+  getMessageCount,
   getSummaries, addSummary, clearSummaries, clearSessionMessages,
 } from './db.mjs';
 
@@ -43,6 +44,7 @@ const COMPRESS_PROMPT = '\n\n' + loadPrompt('compress.md');
 // --- Routes ---
 app.use('/api/sessions', sessionRoutes);
 app.use('/api/upload', uploadRoutes);
+app.use('/api/data', dataRoutes);
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', tools: ['exa-search'], hasChat: true, hasDb: true });
@@ -75,6 +77,17 @@ app.post('/api/chat', async (req, res) => {
 
   console.log(`[Chat] provider=${provider}, model=${model}, messages=${messages.length}, rounds=${roundCount}, compress=${shouldCompress}`);
 
+  // Abort handling for client disconnect
+  const abortController = new AbortController();
+  // Note: req.on('close') fires immediately in Express 5 with SSE
+  // Use res.on('close') instead
+  res.on('close', () => {
+    if (!res.writableFinished) {
+      abortController.abort();
+      console.log('[Chat] Client disconnected, aborting LLM request');
+    }
+  });
+
   // Set up SSE
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -82,7 +95,9 @@ app.post('/api/chat', async (req, res) => {
   res.flushHeaders();
 
   function sendSSE(event, data) {
-    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    if (!res.writableEnded) {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    }
   }
 
   try {
@@ -95,7 +110,7 @@ app.post('/api/chat', async (req, res) => {
     if (hasDocument) {
       // Document uploaded: skip system prompt, go directly to search-answer prompt
       console.log(`[Chat] Document detected, using search-answer prompt`);
-      await streamLLM(config, apiKey, model, [
+      await streamLLM(config, apiKey, model, abortController.signal, [
         { role: 'system', content: SEARCH_ANSWER_PROMPT },
         ...messages.map(m => ({ role: m.role, content: m.content })),
       ], (chunk) => {
@@ -106,7 +121,7 @@ app.post('/api/chat', async (req, res) => {
       // Normal flow: collect first, check for tags
       const contextMessages = buildContext(messages, sessionId, shouldCompress);
 
-      await streamLLM(config, apiKey, model, contextMessages, (chunk) => {
+      await streamLLM(config, apiKey, model, abortController.signal, contextMessages, (chunk) => {
         firstResponse += chunk;
       });
 
@@ -150,7 +165,7 @@ app.post('/api/chat', async (req, res) => {
           : `Search results:\n\n${searchContext}`;
 
         let secondResponse = '';
-        await streamLLM(config, apiKey, model, [
+        await streamLLM(config, apiKey, model, abortController.signal, [
           { role: 'system', content: SEARCH_ANSWER_PROMPT },
           { role: 'user', content: `My question: ${userQuestion}\n\n${materials}` },
         ], (chunk) => {
@@ -172,7 +187,7 @@ app.post('/api/chat', async (req, res) => {
           : 'No previous conversation summaries found.';
 
         let recallResponse = '';
-        await streamLLM(config, apiKey, model, [
+        await streamLLM(config, apiKey, model, abortController.signal, [
           ...contextMessages,
           { role: 'assistant', content: `[RECALL: ${recallQuery}]` },
           { role: 'user', content: `Here are the previous conversation summaries:\n\n${recallContext}\n\nPlease answer based on these memories.` },
@@ -188,19 +203,24 @@ app.post('/api/chat', async (req, res) => {
     // Process tags in final response
     let finalResponse = firstResponse;
 
-    if (finalResponse.includes('[FORGET_HISTORY]') && sessionId) {
-      console.log(`[Chat] Forgetting history for session ${sessionId}`);
-      clearSessionMessages(sessionId);
-      clearSummaries(sessionId);
-      finalResponse = finalResponse.replace(/\[FORGET_HISTORY\]/g, '').trim();
-    }
-
+    // Process DB operations in a transaction
     const summaryMatch = finalResponse.match(/\[SUMMARY\]([\s\S]*?)\[\/SUMMARY\]/);
-    if (summaryMatch && sessionId) {
-      const summary = summaryMatch[1].trim();
-      console.log(`[Chat] Saving compressed summary (${summary.length} chars)`);
-      addSummary(sessionId, summary, Math.max(0, roundCount - COMPRESS_EVERY), roundCount);
-      finalResponse = finalResponse.replace(/\[SUMMARY\][\s\S]*?\[\/SUMMARY\]/g, '').trim();
+    const hasForget = finalResponse.includes('[FORGET_HISTORY]') && sessionId;
+
+    if (hasForget || summaryMatch) {
+      const processTags = db.transaction(() => {
+        if (hasForget) {
+          console.log(`[Chat] Forgetting history for session ${sessionId}`);
+          clearSessionMessages(sessionId);
+          clearSummaries(sessionId);
+        }
+        if (summaryMatch && sessionId) {
+          const summary = summaryMatch[1].trim();
+          console.log(`[Chat] Saving compressed summary (${summary.length} chars)`);
+          addSummary(sessionId, summary, Math.max(0, roundCount - COMPRESS_EVERY), roundCount);
+        }
+      });
+      processTags();
     }
 
     finalResponse = finalResponse
@@ -214,22 +234,26 @@ app.post('/api/chat', async (req, res) => {
     res.end();
 
   } catch (err) {
-    console.error('[Chat] Error:', err.message);
-    sendSSE('error', { error: err.message });
-    res.end();
+    if (abortController.signal.aborted) {
+      console.log('[Chat] Request aborted by client');
+    } else {
+      console.error('[Chat] Error:', err.message);
+      sendSSE('error', { error: err.message });
+    }
+    if (!res.writableFinished) res.end();
   }
 });
 
 // --- Streaming LLM calls ---
 
-async function streamLLM(config, apiKey, model, messages, onChunk) {
+async function streamLLM(config, apiKey, model, signal, messages, onChunk) {
   if (config.type === 'claude') {
-    return streamClaude(apiKey, model, messages, onChunk);
+    return streamClaude(apiKey, model, messages, onChunk, signal);
   }
-  return streamOpenAICompatible(config.baseUrl, apiKey, model, messages, onChunk);
+  return streamOpenAICompatible(config.baseUrl, apiKey, model, messages, onChunk, signal);
 }
 
-async function streamOpenAICompatible(baseUrl, apiKey, model, messages, onChunk) {
+async function streamOpenAICompatible(baseUrl, apiKey, model, messages, onChunk, signal) {
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -237,6 +261,7 @@ async function streamOpenAICompatible(baseUrl, apiKey, model, messages, onChunk)
       'Authorization': `Bearer ${apiKey}`,
     },
     body: JSON.stringify({ model, messages, max_tokens: 4096, stream: true }),
+    signal,
   });
 
   if (!response.ok) {
@@ -269,7 +294,7 @@ async function streamOpenAICompatible(baseUrl, apiKey, model, messages, onChunk)
   }
 }
 
-async function streamClaude(apiKey, model, messages, onChunk) {
+async function streamClaude(apiKey, model, messages, onChunk, signal) {
   const systemMsgs = messages.filter(m => m.role === 'system');
   const systemText = systemMsgs.map(m => m.content).join('\n\n');
   const chatMsgs = messages.filter(m => m.role !== 'system');
@@ -282,6 +307,7 @@ async function streamClaude(apiKey, model, messages, onChunk) {
       'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify({ model, max_tokens: 4096, system: systemText, messages: chatMsgs, stream: true }),
+    signal,
   });
 
   if (!response.ok) {
@@ -343,6 +369,13 @@ function formatSearchResults(results) {
     return text;
   }).join('\n\n---\n\n');
 }
+
+process.on('uncaughtException', (err) => {
+  console.error('[Fatal] Uncaught exception:', err.message);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[Fatal] Unhandled rejection:', reason);
+});
 
 app.listen(PORT, () => {
   console.log(`[MCP] Server running on http://localhost:${PORT}`);

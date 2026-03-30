@@ -1,88 +1,83 @@
 import { Router } from 'express';
 import {
-  getAllSessions, getSession, createSession, updateSessionTitle,
+  getAllSessions, createSession, updateSessionTitle,
   deleteSession, archiveSession, getMessages, addMessage,
   updateMessage, deleteMessagesAfter, getMessageCount,
-  clearSessionMessages, getSummaries, clearSummaries, forgetSession,
+  getSummaries, forgetSession,
 } from '../db.mjs';
 
 const router = Router();
 
+function wrap(fn) {
+  return async (req, res, next) => {
+    try {
+      await fn(req, res, next);
+    } catch (err) {
+      console.error(`[Sessions] ${req.method} ${req.path} error:`, err.message);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  };
+}
+
 // --- Sessions ---
 
-// GET /api/sessions
-router.get('/', (req, res) => {
-  const sessions = getAllSessions();
-  res.json(sessions);
-});
+router.get('/', wrap((req, res) => {
+  res.json(getAllSessions());
+}));
 
-// POST /api/sessions
-router.post('/', (req, res) => {
+router.post('/', wrap((req, res) => {
   const { id, title, createdAt } = req.body;
   createSession(id, title || 'New Chat', createdAt || new Date().toISOString());
   res.json({ ok: true });
-});
+}));
 
-// PATCH /api/sessions/:id
-router.patch('/:id', (req, res) => {
+router.patch('/:id', wrap((req, res) => {
   const { title, archived } = req.body;
   if (title !== undefined) updateSessionTitle(req.params.id, title);
   if (archived !== undefined) archiveSession(req.params.id, archived);
   res.json({ ok: true });
-});
+}));
 
-// DELETE /api/sessions/:id
-router.delete('/:id', (req, res) => {
+router.delete('/:id', wrap((req, res) => {
   deleteSession(req.params.id);
   res.json({ ok: true });
-});
+}));
 
 // --- Messages ---
 
-// GET /api/sessions/:id/messages
-router.get('/:id/messages', (req, res) => {
-  const messages = getMessages(req.params.id);
-  res.json(messages);
-});
+router.get('/:id/messages', wrap((req, res) => {
+  res.json(getMessages(req.params.id));
+}));
 
-// POST /api/sessions/:id/messages
-router.post('/:id/messages', (req, res) => {
+router.post('/:id/messages', wrap((req, res) => {
   const { id: msgId, role, content, timestamp } = req.body;
   addMessage(msgId, req.params.id, role, content, timestamp);
   res.json({ ok: true });
-});
+}));
 
-// PUT /api/sessions/:id/messages/:msgId
-router.put('/:id/messages/:msgId', (req, res) => {
-  const { content } = req.body;
-  updateMessage(req.params.msgId, content);
+router.put('/:id/messages/:msgId', wrap((req, res) => {
+  updateMessage(req.params.msgId, req.body.content);
   res.json({ ok: true });
-});
+}));
 
-// DELETE /api/sessions/:id/messages-after/:timestamp
-router.delete('/:id/messages-after/:timestamp', (req, res) => {
+router.delete('/:id/messages-after/:timestamp', wrap((req, res) => {
   deleteMessagesAfter(req.params.id, req.params.timestamp);
   res.json({ ok: true });
-});
+}));
 
-// GET /api/sessions/:id/message-count
-router.get('/:id/message-count', (req, res) => {
-  const count = getMessageCount(req.params.id);
-  res.json({ count });
-});
+router.get('/:id/message-count', wrap((req, res) => {
+  res.json({ count: getMessageCount(req.params.id) });
+}));
 
 // --- Memory ---
 
-// GET /api/sessions/:id/summaries
-router.get('/:id/summaries', (req, res) => {
-  const summaries = getSummaries(req.params.id);
-  res.json(summaries);
-});
+router.get('/:id/summaries', wrap((req, res) => {
+  res.json(getSummaries(req.params.id));
+}));
 
-// POST /api/sessions/:id/forget
-router.post('/:id/forget', (req, res) => {
+router.post('/:id/forget', wrap((req, res) => {
   forgetSession(req.params.id);
   res.json({ ok: true });
-});
+}));
 
 export default router;

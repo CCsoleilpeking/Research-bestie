@@ -6,6 +6,7 @@ import rehypeKatex from 'rehype-katex';
 import type { ChatMessage } from '../types';
 import { genId } from '../utils/id';
 import { sendChatMessage, getLLMConfig } from '../utils/llm';
+import { API_URL } from '../utils/api';
 
 interface Props {
   messages: ChatMessage[];
@@ -282,7 +283,7 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
       formData.append('file', file);
       if (sessionId) formData.append('sessionId', sessionId);
 
-      const response = await fetch('http://localhost:3001/api/upload', {
+      const response = await fetch(`${API_URL}/api/upload`, {
         method: 'POST',
         body: formData,
       });

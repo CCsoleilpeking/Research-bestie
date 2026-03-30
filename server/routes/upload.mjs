@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import multer from 'multer';
-import { readFileSync } from 'fs';
+import { readFileSync, unlinkSync } from 'fs';
 import { extname } from 'path';
 import { addDocument } from '../db.mjs';
 
@@ -73,6 +73,9 @@ router.post('/', upload.single('file'), async (req, res) => {
     // Save to database
     addDocument(docId, sessionId, req.file.originalname, ext.slice(1), contentText);
 
+    // Clean up temp file
+    try { unlinkSync(filePath); } catch {}
+
     console.log(`[Upload] Parsed ${contentText.length} chars, saved as ${docId}`);
 
     res.json({
@@ -80,11 +83,12 @@ router.post('/', upload.single('file'), async (req, res) => {
       filename: req.file.originalname,
       fileType: ext.slice(1),
       contentLength: contentText.length,
-      // Send first 5000 chars as preview (full content in DB)
       preview: contentText.slice(0, 5000),
-      contentText: contentText.slice(0, 50000), // Cap at 50K chars for LLM
+      contentText: contentText.slice(0, 50000),
     });
   } catch (err) {
+    // Clean up temp file on error too
+    if (req.file?.path) try { unlinkSync(req.file.path); } catch {}
     console.error('[Upload] Error:', err.message);
     res.status(500).json({ error: err.message });
   }

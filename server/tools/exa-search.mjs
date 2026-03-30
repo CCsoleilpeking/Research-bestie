@@ -8,16 +8,19 @@ async function getClient() {
   if (client) return client;
 
   console.log('[Exa] Connecting to Exa MCP...');
-  client = new Client({ name: 'research-bestie', version: '1.0.0' });
-
+  const c = new Client({ name: 'research-bestie', version: '1.0.0' });
   const transport = new StreamableHTTPClientTransport(new URL(EXA_MCP_URL));
-  await client.connect(transport);
+  await c.connect(transport);
 
-  // List available tools
-  const tools = await client.listTools();
+  const tools = await c.listTools();
   console.log('[Exa] Available tools:', tools.tools.map(t => t.name));
-
+  client = c; // Only assign after successful connection
   return client;
+}
+
+function resetClient() {
+  console.log('[Exa] Resetting client connection');
+  client = null;
 }
 
 export async function searchExa({ query, type = 'auto', numResults = 5 }) {
@@ -25,54 +28,60 @@ export async function searchExa({ query, type = 'auto', numResults = 5 }) {
 
   console.log(`[Exa] Searching: "${query}" (type=${type}, numResults=${numResults})`);
 
-  const mcpClient = await getClient();
+  try {
+    const mcpClient = await getClient();
+    const result = await mcpClient.callTool({
+      name: 'web_search_exa',
+      arguments: {
+        query,
+        numResults: Math.min(Math.max(numResults, 1), 10),
+      },
+    });
 
-  const result = await mcpClient.callTool({
-    name: 'web_search_exa',
-    arguments: {
-      query,
-      numResults: Math.min(Math.max(numResults, 1), 10),
-    },
-  });
+    console.log(`[Exa] Got result`);
+    const content = result.content || [];
+    const textContent = content
+      .filter(c => c.type === 'text')
+      .map(c => c.text)
+      .join('\n');
 
-  console.log(`[Exa] Got result`);
-
-  // Parse MCP result
-  const content = result.content || [];
-  const textContent = content
-    .filter(c => c.type === 'text')
-    .map(c => c.text)
-    .join('\n');
-
-  return {
-    raw: textContent,
-    results: parseSearchResults(textContent),
-  };
+    return {
+      raw: textContent,
+      results: parseSearchResults(textContent),
+    };
+  } catch (err) {
+    resetClient();
+    throw err;
+  }
 }
 
 export async function crawlExa(url) {
   if (!url) throw new Error('URL is required');
 
   console.log(`[Exa] Crawling: ${url}`);
-  const mcpClient = await getClient();
 
-  const result = await mcpClient.callTool({
-    name: 'crawling_exa',
-    arguments: { url },
-  });
+  try {
+    const mcpClient = await getClient();
+    const result = await mcpClient.callTool({
+      name: 'crawling_exa',
+      arguments: { urls: [url] },
+    });
 
-  const content = result.content || [];
-  const text = content
-    .filter(c => c.type === 'text')
-    .map(c => c.text)
-    .join('\n');
+    const content = result.content || [];
+    const text = content
+      .filter(c => c.type === 'text')
+      .map(c => c.text)
+      .join('\n');
 
-  console.log(`[Exa] Crawled ${text.length} chars`);
-  return text;
+    console.log(`[Exa] Crawled ${text.length} chars`);
+    return text;
+  } catch (err) {
+    resetClient();
+    throw err;
+  }
 }
 
 function parseSearchResults(text) {
-  // Try to parse structured results from the text
   const results = [];
   const lines = text.split('\n');
   let current = null;
@@ -92,7 +101,6 @@ function parseSearchResults(text) {
   }
   if (current) results.push(current);
 
-  // If parsing didn't work well, return the raw text as a single result
   if (results.length === 0) {
     return [{ title: 'Search Results', url: '', text }];
   }
