@@ -290,17 +290,19 @@ function App() {
       }
     }
 
-    // Generate title asynchronously
+    // Generate title asynchronously — delay to avoid interfering with main chat SSE
     if (firstUser) {
-      const config = getLLMConfig();
-      generateChatTitle(firstUser.content, config).then(title => {
-        setSessions(prev => prev.map(s => {
-          if (s.id !== activeId) return s;
-          if (s.title !== 'New Chat') return s;
-          return { ...s, title };
-        }));
-        if (backendReady) { updateSessionAPI(activeId, { title }).catch(console.error); }
-      });
+      setTimeout(() => {
+        const config = getLLMConfig();
+        generateChatTitle(firstUser.content, config).then(title => {
+          setSessions(prev => prev.map(s => {
+            if (s.id !== activeId) return s;
+            if (s.title !== 'New Chat') return s;
+            return { ...s, title };
+          }));
+          if (backendReady) { updateSessionAPI(activeId, { title }).catch(console.error); }
+        });
+      }, 3000); // Wait 3s for main chat to finish
     }
   }
 

@@ -158,12 +158,47 @@ function sanitizeApiKey(key: string): string {
 
 const BACKEND_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
+export interface FigureInfo {
+  id: string;
+  filename: string;
+  caption: string;
+  url: string;
+}
+
+export function subscribeFigures(sessionId: string, onFigures: (figures: FigureInfo[]) => void): () => void {
+  const url = `${BACKEND_URL}/api/figures-stream/${sessionId}`;
+  log('[Figures] Subscribing to:', url);
+
+  const eventSource = new EventSource(url);
+
+  eventSource.addEventListener('figures', (e) => {
+    const data = JSON.parse(e.data);
+    log('[Figures] Received:', data.figures.length, 'figures');
+    onFigures(data.figures);
+    eventSource.close();
+  });
+
+  eventSource.addEventListener('error', () => {
+    log('[Figures] Stream error or no job');
+    eventSource.close();
+  });
+
+  eventSource.addEventListener('status', (e) => {
+    const data = JSON.parse(e.data);
+    log('[Figures] Status:', data.status);
+    if (data.status === 'no_job') eventSource.close();
+  });
+
+  return () => eventSource.close();
+}
+
 async function sendViaBackend(
   messages: ChatMessage[],
   config: LLMConfig,
   sessionId?: string,
-  onChunk?: (chunk: string) => void
-): Promise<string | null> {
+  onChunk?: (chunk: string) => void,  // NOTE: receives accumulated full text, not incremental chunks
+  onStatus?: (status: string, detail: string) => void,
+): Promise<{ content: string; figures: FigureInfo[] } | null> {
   try {
     const response = await fetch(`${BACKEND_URL}/api/chat`, {
       method: 'POST',
@@ -195,6 +230,8 @@ async function sendViaBackend(
     let finalContent = '';
     let pendingText = '';
     let typewriterDone = false;
+    let figuresProcessing = false;
+    let receivedFigures: FigureInfo[] = [];
 
     // Typewriter: flush pendingText char by char
     const typewriterInterval = setInterval(() => {
@@ -241,8 +278,12 @@ async function sendViaBackend(
             finalContent = data.content;
           } else if (eventType === 'error') {
             throw new Error(data.error);
+          } else if (eventType === 'figures') {
+            receivedFigures = data.figures || [];
+            log(`[Backend] Received ${receivedFigures.length} figures`);
           } else if (eventType === 'status') {
             log(`[Backend] Status: ${data.type}`, data.query || '');
+            if (onStatus) onStatus(data.type, data.query || '');
           }
         } catch (e) {
           if (e instanceof Error && e.message.startsWith('Unexpected')) continue;
@@ -263,7 +304,7 @@ async function sendViaBackend(
       }, 20);
     });
 
-    return finalContent || full;
+    return { content: finalContent || full, figures: receivedFigures };
   } catch (err) {
     log('[Backend] Not available or error, falling back to direct LLM call:', err);
     return null;
@@ -274,8 +315,9 @@ export async function sendChatMessage(
   messages: ChatMessage[],
   config: LLMConfig,
   onChunk?: (chunk: string) => void,
-  sessionId?: string
-): Promise<string> {
+  sessionId?: string,
+  onStatus?: (status: string, detail: string) => void,
+): Promise<{ content: string; figures: FigureInfo[] }> {
   config = { ...config, apiKey: sanitizeApiKey(config.apiKey || '') };
   if (!config.apiKey) {
     logError('No API key configured');
@@ -287,11 +329,11 @@ export async function sendChatMessage(
 
   try {
     // Try backend first (has search + memory + streaming capability)
-    const backendResult = await sendViaBackend(messages, config, sessionId, onChunk);
+    const backendResult = await sendViaBackend(messages, config, sessionId, onChunk, onStatus);
     if (backendResult !== null) {
       const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
-      log(`[Backend] Response received in ${elapsed}s, length=${backendResult.length}`);
-      return backendResult;
+      log(`[Backend] Response received in ${elapsed}s, length=${backendResult.content.length}, figures=${backendResult.figures.length}`);
+      return { content: backendResult.content, figures: backendResult.figures };
     }
 
     // Fallback: direct LLM call (no search capability)
@@ -304,7 +346,7 @@ export async function sendChatMessage(
 
     const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
     log(`Response received in ${elapsed}s, length=${result.length}`);
-    return result;
+    return { content: result, figures: [] };
   } catch (err) {
     const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
     logError(`Request failed after ${elapsed}s:`, err);

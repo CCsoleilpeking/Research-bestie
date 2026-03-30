@@ -3,7 +3,8 @@ import cors from 'cors';
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { searchExa, crawlExa } from './tools/exa-search.mjs';
+import { searchExa, crawlExa, extractImagesFromUrl } from './tools/exa-search.mjs';
+import { downloadArxivPdf, parsePdfWithMinerU } from './tools/mineru-parser.mjs';
 import { sortByTrust } from './tools/trusted-domains.mjs';
 import sessionRoutes from './routes/sessions.mjs';
 import uploadRoutes from './routes/upload.mjs';
@@ -14,9 +15,12 @@ import db, {
 } from './db.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
 function loadPrompt(name) {
   return readFileSync(join(__dirname, 'prompts', name), 'utf-8').trim();
 }
+
+// --- App setup ---
 
 const app = express();
 const PORT = 3001;
@@ -24,27 +28,139 @@ const PORT = 3001;
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Provider configs
+// --- Constants ---
+
 const PROVIDER_CONFIGS = {
-  openai: { baseUrl: 'https://api.openai.com/v1', type: 'openai' },
-  claude: { baseUrl: 'https://api.anthropic.com/v1', type: 'claude' },
+  openai:   { baseUrl: 'https://api.openai.com/v1', type: 'openai' },
+  claude:   { baseUrl: 'https://api.anthropic.com/v1', type: 'claude' },
   deepseek: { baseUrl: 'https://api.deepseek.com/v1', type: 'openai' },
-  kimi: { baseUrl: 'https://api.moonshot.cn/v1', type: 'openai' },
-  gemini: { baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', type: 'openai' },
-  ionet: { baseUrl: 'https://api.intelligence.io.solutions/api/v1', type: 'openai' },
+  kimi:     { baseUrl: 'https://api.moonshot.cn/v1', type: 'openai' },
+  gemini:   { baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', type: 'openai' },
+  ionet:    { baseUrl: 'https://api.intelligence.io.solutions/api/v1', type: 'openai' },
 };
 
-const COMPRESS_EVERY = 20;
+const COMPRESS_EVERY          = 20;
+const TAG_QUICK_CHECK_LIMIT   = 20;   // If no [ in first 20 chars, start streaming
+const TAG_DEEP_BUFFER_LIMIT   = 200;  // If [ found, buffer up to 200 chars to find complete tag
+const FIGURE_CACHE_TTL_MS   = 30 * 60 * 1000;
+const CONTENT_TRUNCATE_LIMIT = 30000;
+const MAX_SEARCH_RESULTS    = 5;
+const MIN_CRAWL_LENGTH      = 500;
+const LLM_MAX_TOKENS        = 4096;
+
+const TAG_CLEANUP_PATTERNS = [
+  /\[SEARCH:[^\]]*\]/g,
+  /\[RECALL:[^\]]*\]/g,
+  /\[FORGET_HISTORY\]/g,
+  /\[SUMMARY\][\s\S]*?\[\/SUMMARY\]/g,
+];
 
 // Load prompts from files
-const SYSTEM_PROMPT = loadPrompt('system.md');
+const SYSTEM_PROMPT        = loadPrompt('system.md');
 const SEARCH_ANSWER_PROMPT = loadPrompt('search-answer.md');
-const COMPRESS_PROMPT = '\n\n' + loadPrompt('compress.md');
+const COMPRESS_PROMPT      = '\n\n' + loadPrompt('compress.md');
 
 // --- Routes ---
+
 app.use('/api/sessions', sessionRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/data', dataRoutes);
+app.use('/api/figures', express.static(join(__dirname, '..', 'data', 'figures')));
+
+// --- Figures (MinerU) ---
+
+const pendingFigures  = new Map();  // sessionId -> { status, figures, error, createdAt }
+const figureListeners = new Map();  // sessionId -> [res, ...]
+
+// Periodically clean up stale entries
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, entry] of pendingFigures) {
+    if (now - entry.createdAt > FIGURE_CACHE_TTL_MS) {
+      pendingFigures.delete(id);
+    }
+  }
+}, FIGURE_CACHE_TTL_MS);
+
+app.get('/api/figures-stream/:sessionId', (req, res) => {
+  const { sessionId } = req.params;
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const existing = pendingFigures.get(sessionId);
+
+  // Already completed — return result immediately
+  if (existing?.status === 'done') {
+    res.write(`event: figures\ndata: ${JSON.stringify({ figures: existing.figures })}\n\n`);
+    res.end();
+    return;
+  }
+  if (existing?.status === 'error') {
+    res.write(`event: error\ndata: ${JSON.stringify({ error: existing.error })}\n\n`);
+    res.end();
+    return;
+  }
+
+  // No job pending — nothing to wait for
+  if (!existing) {
+    res.write(`event: status\ndata: ${JSON.stringify({ status: 'no_job' })}\n\n`);
+    res.end();
+    return;
+  }
+
+  // Job in progress — register listener only after all early-return checks
+  if (!figureListeners.has(sessionId)) figureListeners.set(sessionId, []);
+  figureListeners.get(sessionId).push(res);
+
+  res.write(`event: status\ndata: ${JSON.stringify({ status: 'parsing' })}\n\n`);
+
+  res.on('close', () => {
+    const listeners = figureListeners.get(sessionId);
+    if (listeners) {
+      const idx = listeners.indexOf(res);
+      if (idx >= 0) listeners.splice(idx, 1);
+    }
+  });
+});
+
+function notifyFigureListeners(sessionId, event, data) {
+  const listeners = figureListeners.get(sessionId) || [];
+  for (const res of listeners) {
+    if (!res.writableFinished) {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      res.end();
+    }
+  }
+  figureListeners.delete(sessionId);
+}
+
+async function processArxivFigures(sessionId, arxivUrl) {
+  pendingFigures.set(sessionId, {
+    status: 'parsing', figures: [], error: null, createdAt: Date.now(),
+  });
+  console.log(`[MinerU] Starting async parse for session ${sessionId}: ${arxivUrl}`);
+
+  try {
+    const pdfPath = await downloadArxivPdf(arxivUrl);
+    const { figures } = await parsePdfWithMinerU(pdfPath);
+    console.log(`[MinerU] Done: ${figures.length} figures extracted`);
+
+    pendingFigures.set(sessionId, {
+      status: 'done', figures, error: null, createdAt: Date.now(),
+    });
+    notifyFigureListeners(sessionId, 'figures', { figures });
+  } catch (err) {
+    console.error(`[MinerU] Failed:`, err.message);
+    pendingFigures.set(sessionId, {
+      status: 'error', figures: [], error: err.message, createdAt: Date.now(),
+    });
+    notifyFigureListeners(sessionId, 'error', { error: err.message });
+  }
+}
+
+// --- Health & Tools ---
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', tools: ['exa-search'], hasChat: true, hasDb: true });
@@ -55,13 +171,13 @@ app.get('/api/tools', (req, res) => {
 });
 
 // --- Main chat endpoint (SSE streaming) ---
+
 app.post('/api/chat', async (req, res) => {
   const { messages, provider, apiKey, model, sessionId } = req.body;
 
   if (!apiKey || !model || !provider) {
     return res.status(400).json({ error: 'Missing provider, apiKey, or model' });
   }
-
   const config = PROVIDER_CONFIGS[provider];
   if (!config) {
     return res.status(400).json({ error: `Unknown provider: ${provider}` });
@@ -77,22 +193,21 @@ app.post('/api/chat', async (req, res) => {
 
   console.log(`[Chat] provider=${provider}, model=${model}, messages=${messages.length}, rounds=${roundCount}, compress=${shouldCompress}`);
 
-  // Abort handling for client disconnect
   const abortController = new AbortController();
-  // Note: req.on('close') fires immediately in Express 5 with SSE
-  // Use res.on('close') instead
-  res.on('close', () => {
-    if (!res.writableFinished) {
-      abortController.abort();
-      console.log('[Chat] Client disconnected, aborting LLM request');
-    }
-  });
 
   // Set up SSE
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
+
+  // Abort on client disconnect — must be after flushHeaders
+  res.on('close', () => {
+    if (!res.writableFinished) {
+      abortController.abort();
+      console.log('[Chat] Client disconnected, aborting LLM request');
+    }
+  });
 
   function sendSSE(event, data) {
     if (!res.writableEnded) {
@@ -105,132 +220,54 @@ app.post('/api/chat', async (req, res) => {
     const lastUserMsg = messages[messages.length - 1]?.content || '';
     const hasDocument = lastUserMsg.includes('[File ') || lastUserMsg.includes('[Uploaded file:');
 
-    let firstResponse = '';
+    let finalResponse = '';
 
     if (hasDocument) {
-      // Document uploaded: skip system prompt, go directly to search-answer prompt
+      // Document mode: use search-answer prompt, stream directly
       console.log(`[Chat] Document detected, using search-answer prompt`);
       await streamLLM(config, apiKey, model, abortController.signal, [
         { role: 'system', content: SEARCH_ANSWER_PROMPT },
         ...messages.map(m => ({ role: m.role, content: m.content })),
       ], (chunk) => {
-        firstResponse += chunk;
+        finalResponse += chunk;
         sendSSE('chunk', { content: chunk });
       });
     } else {
-      // Normal flow: collect first, check for tags
+      // Normal flow: stream with smart tag detection
       const contextMessages = buildContext(messages, sessionId, shouldCompress);
+      const { fullText, detectedTag } = await streamWithTagDetection(
+        config, apiKey, model, abortController.signal, contextMessages, sendSSE,
+      );
 
-      await streamLLM(config, apiKey, model, abortController.signal, contextMessages, (chunk) => {
-        firstResponse += chunk;
-      });
+      // Always process DB tags from the first response — it may contain
+      // [SUMMARY] (when shouldCompress) even if a search/recall tag was also present.
+      processDbTags(fullText, sessionId, roundCount);
 
-      console.log(`[Chat] First response (${Date.now() - startTime}ms):`, firstResponse.slice(0, 100));
-
-      const searchMatch = firstResponse.match(/\[SEARCH:\s*(.+?)\]/);
-      const recallMatch = firstResponse.match(/\[RECALL:\s*(.+?)\]/);
-
-      if (!searchMatch && !recallMatch) {
-        // No tags, send full content at once — frontend will animate it
-        sendSSE('chunk', { content: firstResponse });
+      if (detectedTag?.type === 'search') {
+        finalResponse = await handleSearch(
+          detectedTag.query, lastUserMsg,
+          config, apiKey, model, abortController.signal, sendSSE,
+        );
+      } else if (detectedTag?.type === 'recall' && sessionId) {
+        finalResponse = await handleRecall(
+          detectedTag.query, sessionId, contextMessages,
+          config, apiKey, model, abortController.signal, sendSSE,
+        );
+      } else {
+        finalResponse = fullText;
       }
-
-      if (searchMatch) {
-        const searchQuery = searchMatch[1].trim();
-        console.log(`[Chat] Search requested: "${searchQuery}"`);
-        sendSSE('status', { type: 'searching', query: searchQuery });
-
-        const searchResult = await searchExa({ query: searchQuery, numResults: 5 });
-        const sorted = sortByTrust(searchResult.results || []);
-        const searchContext = formatSearchResults(sorted);
-
-        // Crawl the top result for full content
-        let fullContent = '';
-        const topUrl = sorted[0]?.url;
-        if (topUrl) {
-          try {
-            console.log(`[Chat] Crawling top result: ${topUrl}`);
-            fullContent = await crawlExa(topUrl);
-            // Cap at 30000 chars to avoid token limit
-            if (fullContent.length > 30000) fullContent = fullContent.slice(0, 30000) + '\n\n[Content truncated]';
-            console.log(`[Chat] Crawled ${fullContent.length} chars`);
-          } catch (err) {
-            console.error(`[Chat] Crawl failed:`, err.message);
-          }
-        }
-
-        const userQuestion = lastUserMsg;
-        const materials = fullContent
-          ? `Search results:\n\n${searchContext}\n\nFull content from top result (${topUrl}):\n\n${fullContent}`
-          : `Search results:\n\n${searchContext}`;
-
-        let secondResponse = '';
-        await streamLLM(config, apiKey, model, abortController.signal, [
-          { role: 'system', content: SEARCH_ANSWER_PROMPT },
-          { role: 'user', content: `My question: ${userQuestion}\n\n${materials}` },
-        ], (chunk) => {
-          secondResponse += chunk;
-          sendSSE('chunk', { content: chunk });
-        });
-
-        firstResponse = secondResponse;
-      }
-
-      if (recallMatch && sessionId) {
-        const recallQuery = recallMatch[1].trim();
-        console.log(`[Chat] Recall requested: "${recallQuery}"`);
-        sendSSE('status', { type: 'recalling', query: recallQuery });
-
-        const summaries = getSummaries(sessionId);
-        const recallContext = summaries.length > 0
-          ? summaries.map(s => s.summary).join('\n\n')
-          : 'No previous conversation summaries found.';
-
-        let recallResponse = '';
-        await streamLLM(config, apiKey, model, abortController.signal, [
-          ...contextMessages,
-          { role: 'assistant', content: `[RECALL: ${recallQuery}]` },
-          { role: 'user', content: `Here are the previous conversation summaries:\n\n${recallContext}\n\nPlease answer based on these memories.` },
-        ], (chunk) => {
-          recallResponse += chunk;
-          sendSSE('chunk', { content: chunk });
-        });
-
-        firstResponse = recallResponse;
-      }
-    } // end of else (normal flow)
-
-    // Process tags in final response
-    let finalResponse = firstResponse;
-
-    // Process DB operations in a transaction
-    const summaryMatch = finalResponse.match(/\[SUMMARY\]([\s\S]*?)\[\/SUMMARY\]/);
-    const hasForget = finalResponse.includes('[FORGET_HISTORY]') && sessionId;
-
-    if (hasForget || summaryMatch) {
-      const processTags = db.transaction(() => {
-        if (hasForget) {
-          console.log(`[Chat] Forgetting history for session ${sessionId}`);
-          clearSessionMessages(sessionId);
-          clearSummaries(sessionId);
-        }
-        if (summaryMatch && sessionId) {
-          const summary = summaryMatch[1].trim();
-          console.log(`[Chat] Saving compressed summary (${summary.length} chars)`);
-          addSummary(sessionId, summary, Math.max(0, roundCount - COMPRESS_EVERY), roundCount);
-        }
-      });
-      processTags();
     }
 
-    finalResponse = finalResponse
-      .replace(/\[SEARCH:[^\]]*\]/g, '')
-      .replace(/\[RECALL:[^\]]*\]/g, '')
-      .replace(/\[FORGET_HISTORY\]/g, '')
-      .trim();
+    // Process DB tags for document mode (first response is finalResponse)
+    if (hasDocument) {
+      processDbTags(finalResponse, sessionId, roundCount);
+    }
+
+    // Strip all internal tags from the response sent to client
+    const cleanedResponse = stripInternalTags(finalResponse);
 
     console.log(`[Chat] Done. total=${Date.now() - startTime}ms`);
-    sendSSE('done', { content: finalResponse });
+    sendSSE('done', { content: cleanedResponse });
     res.end();
 
   } catch (err) {
@@ -243,6 +280,202 @@ app.post('/api/chat', async (req, res) => {
     if (!res.writableFinished) res.end();
   }
 });
+
+// --- Tag detection streaming ---
+// Strategy (Approach B): quick check first 20 chars for [, deep buffer up to 200 if found.
+// Handles tags that appear anywhere in the first 200 chars, tolerates leading whitespace/text.
+
+async function streamWithTagDetection(config, apiKey, model, signal, messages, sendSSE) {
+  let fullText = '';
+  let buffer = '';
+  let streaming = false;
+  let detectedTag = null;
+  let seenBracket = false;
+
+  await streamLLM(config, apiKey, model, signal, messages, (chunk) => {
+    fullText += chunk;
+
+    // Already streaming directly to client
+    if (streaming) {
+      sendSSE('chunk', { content: chunk });
+      return;
+    }
+
+    // Tag already detected — just accumulate the rest silently
+    if (detectedTag) return;
+
+    buffer += chunk;
+
+    // Check for complete tag in buffer (works regardless of position)
+    const searchMatch = buffer.match(/\[SEARCH:\s*(.+?)\]/);
+    if (searchMatch) {
+      detectedTag = { type: 'search', query: searchMatch[1].trim() };
+      console.log(`[TagDetect] SEARCH detected: "${detectedTag.query}"`);
+      return;
+    }
+    const recallMatch = buffer.match(/\[RECALL:\s*(.+?)\]/);
+    if (recallMatch) {
+      detectedTag = { type: 'recall', query: recallMatch[1].trim() };
+      console.log(`[TagDetect] RECALL detected: "${detectedTag.query}"`);
+      return;
+    }
+
+    // Track if we've seen a [ character
+    if (!seenBracket && buffer.includes('[')) {
+      seenBracket = true;
+    }
+
+    // Quick check: no [ in first N chars → definitely not a tag, start streaming
+    if (!seenBracket && buffer.length >= TAG_QUICK_CHECK_LIMIT) {
+      sendSSE('chunk', { content: buffer });
+      buffer = '';
+      streaming = true;
+      return;
+    }
+
+    // Deep buffer: seen [ but no complete tag yet, keep buffering up to limit
+    if (seenBracket && buffer.length >= TAG_DEEP_BUFFER_LIMIT) {
+      // Gave up waiting for complete tag — flush and stream
+      console.log(`[TagDetect] Deep buffer limit reached (${buffer.length}), no complete tag found`);
+      sendSSE('chunk', { content: buffer });
+      buffer = '';
+      streaming = true;
+    }
+  });
+
+  // Flush any remaining buffered content that wasn't a tag
+  if (!streaming && !detectedTag && buffer) {
+    sendSSE('chunk', { content: buffer });
+  }
+
+  return { fullText, detectedTag };
+}
+
+// --- Search handler ---
+
+async function handleSearch(query, userQuestion, config, apiKey, model, signal, sendSSE) {
+  console.log(`[Chat] Search requested: "${query}"`);
+  sendSSE('status', { type: 'searching', query });
+
+  const searchResult = await searchExa({ query, numResults: MAX_SEARCH_RESULTS });
+  const sorted = sortByTrust(searchResult.results || []);
+  const searchContext = formatSearchResults(sorted);
+
+  // Crawl top result for full content + images in parallel
+  let fullContent = '';
+  let imageUrls = [];
+  const topUrl = sorted[0]?.url;
+
+  if (topUrl) {
+    let crawlUrl = topUrl;
+    if (crawlUrl.includes('arxiv.org/abs/')) {
+      crawlUrl = crawlUrl.replace('/abs/', '/html/');
+    }
+
+    sendSSE('status', { type: 'crawling' });
+    console.log(`[Chat] Crawling: ${crawlUrl}`);
+
+    try {
+      const [crawlResult, images] = await Promise.all([
+        crawlExa(crawlUrl).catch(() => ''),
+        extractImagesFromUrl(crawlUrl).catch(() => []),
+      ]);
+
+      fullContent = crawlResult;
+      imageUrls = images;
+
+      // If HTML version too short, fall back to original URL
+      if (fullContent.length < MIN_CRAWL_LENGTH && crawlUrl !== topUrl) {
+        console.log(`[Chat] HTML too short (${fullContent.length}), trying original URL`);
+        fullContent = await crawlExa(topUrl).catch(() => '');
+      }
+      if (fullContent.length > CONTENT_TRUNCATE_LIMIT) {
+        fullContent = fullContent.slice(0, CONTENT_TRUNCATE_LIMIT) + '\n\n[Content truncated]';
+      }
+      console.log(`[Chat] Crawled ${fullContent.length} chars, ${imageUrls.length} images`);
+    } catch (err) {
+      console.error(`[Chat] Crawl failed:`, err.message);
+    }
+  }
+
+  sendSSE('status', { type: 'answering' });
+
+  const materials = fullContent
+    ? `Search results:\n\n${searchContext}\n\nFull content from top result (${topUrl}):\n\n${fullContent}`
+    : `Search results:\n\n${searchContext}`;
+
+  let answerResponse = '';
+  await streamLLM(config, apiKey, model, signal, [
+    { role: 'system', content: SEARCH_ANSWER_PROMPT },
+    { role: 'user', content: `My question: ${userQuestion}\n\n${materials}` },
+  ], (chunk) => {
+    answerResponse += chunk;
+    sendSSE('chunk', { content: chunk });
+  });
+
+  if (imageUrls.length > 0) {
+    sendSSE('figures', {
+      figures: imageUrls.map((url, i) => ({ id: `img_${i}`, url, caption: '' })),
+    });
+  }
+
+  return answerResponse;
+}
+
+// --- Recall handler ---
+
+async function handleRecall(query, sessionId, contextMessages, config, apiKey, model, signal, sendSSE) {
+  console.log(`[Chat] Recall requested: "${query}"`);
+  sendSSE('status', { type: 'recalling', query });
+
+  const summaries = getSummaries(sessionId);
+  const recallContext = summaries.length > 0
+    ? summaries.map(s => s.summary).join('\n\n')
+    : 'No previous conversation summaries found.';
+
+  let recallResponse = '';
+  await streamLLM(config, apiKey, model, signal, [
+    ...contextMessages,
+    { role: 'assistant', content: `[RECALL: ${query}]` },
+    { role: 'user', content: `Here are the previous conversation summaries:\n\n${recallContext}\n\nPlease answer based on these memories.` },
+  ], (chunk) => {
+    recallResponse += chunk;
+    sendSSE('chunk', { content: chunk });
+  });
+
+  return recallResponse;
+}
+
+// --- DB tag processing ---
+
+function processDbTags(response, sessionId, roundCount) {
+  const summaryMatch = response.match(/\[SUMMARY\]([\s\S]*?)\[\/SUMMARY\]/);
+  const hasForget = response.includes('[FORGET_HISTORY]') && sessionId;
+
+  if (!hasForget && !summaryMatch) return;
+
+  const transaction = db.transaction(() => {
+    if (hasForget) {
+      console.log(`[Chat] Forgetting history for session ${sessionId}`);
+      clearSessionMessages(sessionId);
+      clearSummaries(sessionId);
+    }
+    if (summaryMatch && sessionId) {
+      const summary = summaryMatch[1].trim();
+      console.log(`[Chat] Saving compressed summary (${summary.length} chars)`);
+      addSummary(sessionId, summary, Math.max(0, roundCount - COMPRESS_EVERY), roundCount);
+    }
+  });
+  transaction();
+}
+
+function stripInternalTags(text) {
+  let result = text;
+  for (const pattern of TAG_CLEANUP_PATTERNS) {
+    result = result.replace(pattern, '');
+  }
+  return result.trim();
+}
 
 // --- Streaming LLM calls ---
 
@@ -260,7 +493,7 @@ async function streamOpenAICompatible(baseUrl, apiKey, model, messages, onChunk,
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
     },
-    body: JSON.stringify({ model, messages, max_tokens: 4096, stream: true }),
+    body: JSON.stringify({ model, messages, max_tokens: LLM_MAX_TOKENS, stream: true }),
     signal,
   });
 
@@ -289,7 +522,7 @@ async function streamOpenAICompatible(baseUrl, apiKey, model, messages, onChunk,
         const parsed = JSON.parse(data);
         const content = parsed.choices?.[0]?.delta?.content || '';
         if (content) onChunk(content);
-      } catch { /* skip */ }
+      } catch { /* skip malformed SSE chunks */ }
     }
   }
 }
@@ -306,7 +539,10 @@ async function streamClaude(apiKey, model, messages, onChunk, signal) {
       'x-api-key': apiKey,
       'anthropic-version': '2023-06-01',
     },
-    body: JSON.stringify({ model, max_tokens: 4096, system: systemText, messages: chatMsgs, stream: true }),
+    body: JSON.stringify({
+      model, max_tokens: LLM_MAX_TOKENS, system: systemText,
+      messages: chatMsgs, stream: true,
+    }),
     signal,
   });
 
@@ -334,7 +570,7 @@ async function streamClaude(apiKey, model, messages, onChunk, signal) {
         if (event.type === 'content_block_delta' && event.delta?.text) {
           onChunk(event.delta.text);
         }
-      } catch { /* skip */ }
+      } catch { /* skip malformed SSE chunks */ }
     }
   }
 }
@@ -351,7 +587,10 @@ function buildContext(messages, sessionId, shouldCompress) {
     const summaries = getSummaries(sessionId);
     if (summaries.length > 0) {
       const summaryText = summaries.map(s => s.summary).join('\n\n');
-      contextMessages.push({ role: 'system', content: `Previous conversation summary:\n${summaryText}` });
+      contextMessages.push({
+        role: 'system',
+        content: `Previous conversation summary:\n${summaryText}`,
+      });
     }
   }
 
@@ -370,12 +609,16 @@ function formatSearchResults(results) {
   }).join('\n\n---\n\n');
 }
 
+// --- Process error handlers ---
+
 process.on('uncaughtException', (err) => {
   console.error('[Fatal] Uncaught exception:', err.message);
 });
 process.on('unhandledRejection', (reason) => {
   console.error('[Fatal] Unhandled rejection:', reason);
 });
+
+// --- Start server ---
 
 app.listen(PORT, () => {
   console.log(`[MCP] Server running on http://localhost:${PORT}`);

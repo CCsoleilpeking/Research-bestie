@@ -2,11 +2,9 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 
 const EXA_MCP_URL = 'https://mcp.exa.ai/mcp';
-let client = null;
+let clientPromise = null;
 
-async function getClient() {
-  if (client) return client;
-
+async function initClient() {
   console.log('[Exa] Connecting to Exa MCP...');
   const c = new Client({ name: 'research-bestie', version: '1.0.0' });
   const transport = new StreamableHTTPClientTransport(new URL(EXA_MCP_URL));
@@ -14,13 +12,30 @@ async function getClient() {
 
   const tools = await c.listTools();
   console.log('[Exa] Available tools:', tools.tools.map(t => t.name));
-  client = c; // Only assign after successful connection
-  return client;
+  return c;
 }
 
-function resetClient() {
+async function getClient() {
+  if (!clientPromise) {
+    clientPromise = initClient().catch(err => {
+      clientPromise = null; // Allow retry on next call
+      throw err;
+    });
+  }
+  return clientPromise;
+}
+
+async function resetClient() {
   console.log('[Exa] Resetting client connection');
-  client = null;
+  const oldPromise = clientPromise;
+  clientPromise = null;
+  // Gracefully close the old connection if it resolved
+  if (oldPromise) {
+    try {
+      const oldClient = await oldPromise;
+      await oldClient.close();
+    } catch { /* already broken — nothing to close */ }
+  }
 }
 
 export async function searchExa({ query, type = 'auto', numResults = 5 }) {
@@ -78,6 +93,47 @@ export async function crawlExa(url) {
   } catch (err) {
     resetClient();
     throw err;
+  }
+}
+
+export async function extractImagesFromUrl(url) {
+  console.log(`[Exa] Extracting images from: ${url}`);
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      console.log(`[Exa] Failed to fetch HTML: ${response.status}`);
+      return [];
+    }
+    const html = await response.text();
+
+    // Ensure base URL ends with / for correct relative URL resolution
+    const baseUrl = url.endsWith('/') ? url : url + '/';
+
+    // Extract <img> src attributes
+    const imgRegex = /<img[^>]+src=["']([^"']+)["'][^>]*>/gi;
+    const images = [];
+    let match;
+    while ((match = imgRegex.exec(html)) !== null) {
+      let src = match[1];
+      // Skip tiny icons, tracking pixels, data URIs
+      if (src.startsWith('data:')) continue;
+      if (src.includes('pixel') || src.includes('tracker') || src.includes('favicon')) continue;
+      // Convert relative URL to absolute
+      if (!src.startsWith('http')) {
+        try {
+          src = new URL(src, baseUrl).href;
+        } catch { continue; }
+      }
+      images.push(src);
+    }
+
+    // Deduplicate
+    const unique = [...new Set(images)];
+    console.log(`[Exa] Found ${unique.length} images`);
+    return unique;
+  } catch (err) {
+    console.error(`[Exa] Image extraction failed:`, err.message);
+    return [];
   }
 }
 

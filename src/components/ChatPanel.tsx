@@ -5,7 +5,8 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import type { ChatMessage } from '../types';
 import { genId } from '../utils/id';
-import { sendChatMessage, getLLMConfig } from '../utils/llm';
+import { sendChatMessage, getLLMConfig, subscribeFigures } from '../utils/llm';
+import type { FigureInfo } from '../utils/llm';
 import { API_URL } from '../utils/api';
 
 interface Props {
@@ -63,6 +64,10 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [pendingFigures, setPendingFigures] = useState(false);
+  const [figures, setFigures] = useState<FigureInfo[]>([]);
+  const [figuresForMsgId, setFiguresForMsgId] = useState<string | null>(null);
+  const [searchStatus, setSearchStatus] = useState('');
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const MAX_FILES = 4;
@@ -203,15 +208,34 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
     try {
       const config = getLLMConfig();
       console.log('[Chat] Config:', { provider: config.provider, model: config.model, hasKey: !!config.apiKey });
-      const response = await sendChatMessage(llmMessages, config, (chunk) => { setStreamingContent(chunk); }, sessionId);
-      console.log('[Chat] Response received, length:', response.length);
-      onChange([...newMessages, { id: genId(), role: 'assistant', content: response, timestamp: new Date().toISOString() }]);
+      const statusMap: Record<string, string> = {
+        searching: 'Searching the web...',
+        crawling: 'Reading full content...',
+        answering: 'Generating answer...',
+      };
+      const response = await sendChatMessage(
+        llmMessages, config,
+        (chunk) => { setStreamingContent(chunk); },
+        sessionId,
+        (status) => { setSearchStatus(statusMap[status] || ''); },
+      );
+      console.log('[Chat] Response received, length:', response.content.length, 'figures:', response.figures.length);
+      const assistantMsgId = genId();
+      onChange([...newMessages, { id: assistantMsgId, role: 'assistant', content: response.content, timestamp: new Date().toISOString() }]);
+
+      // Show figures if any
+      if (response.figures.length > 0) {
+        console.log('[Chat] Setting figures for msgId:', assistantMsgId, 'count:', response.figures.length);
+        setFiguresForMsgId(assistantMsgId);
+        setFigures(response.figures);
+      }
     } catch (err) {
       console.error('[Chat] Error:', err);
       onChange([...newMessages, { id: genId(), role: 'assistant', content: `Error: ${err instanceof Error ? err.message : 'Unknown error'}`, timestamp: new Date().toISOString() }]);
     } finally {
       setLoading(false);
       setStreamingContent('');
+      setSearchStatus('');
     }
   }
 
@@ -238,7 +262,7 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
       const response = await sendChatMessage(newMessages, config, (chunk) => {
         setStreamingContent(chunk);
       });
-      onChange([...newMessages, { id: genId(), role: 'assistant', content: response, timestamp: new Date().toISOString() }]);
+      onChange([...newMessages, { id: genId(), role: 'assistant', content: response.content, timestamp: new Date().toISOString() }]);
     } catch (err) {
       console.error('[Chat] Edit resend error:', err);
       onChange([...newMessages, { id: genId(), role: 'assistant', content: `Error: ${err instanceof Error ? err.message : 'Unknown error'}`, timestamp: new Date().toISOString() }]);
@@ -491,6 +515,21 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
                 </div>
               </div>
               )}
+
+              {/* Figures for this message */}
+              {msg.id === figuresForMsgId && figures.length > 0 && (
+                <div className="mt-3 space-y-3">
+                  <div className="text-xs text-mint-400 font-semibold">Paper Figures:</div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {figures.map(fig => (
+                      <div key={fig.id} className="bg-dark-400 rounded-lg overflow-hidden border border-dark-50/30">
+                        <img src={fig.url} alt={fig.caption || 'Figure'} className="w-full cursor-pointer hover:opacity-80" onClick={() => window.open(fig.url, '_blank')} />
+                        {fig.caption && <p className="text-xs text-gray-400 p-2">{fig.caption}</p>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
           );
@@ -515,7 +554,10 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
                 <span className="w-2 h-2 bg-mint-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></span>
                 <span className="w-2 h-2 bg-mint-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></span>
               </div>
-              {loadingHint && (
+              {searchStatus && (
+                <p className="text-xs text-mint-400 mt-2 font-medium">{searchStatus}</p>
+              )}
+              {!searchStatus && loadingHint && (
                 <p className="text-xs text-gray-500 mt-2 italic transition-opacity duration-500">{loadingHint}</p>
               )}
             </div>

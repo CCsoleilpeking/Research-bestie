@@ -1,14 +1,19 @@
 import { Router } from 'express';
 import multer from 'multer';
-import { readFileSync, unlinkSync } from 'fs';
+import { readFileSync, unlinkSync, mkdirSync } from 'fs';
 import { extname } from 'path';
 import { addDocument } from '../db.mjs';
 
 const router = Router();
 
+const UPLOAD_DIR = '/tmp/bestie-uploads/';
+
+// Ensure upload directory exists before multer tries to write
+mkdirSync(UPLOAD_DIR, { recursive: true });
+
 // Store uploads with original extension preserved
 const storage = multer.diskStorage({
-  destination: '/tmp/bestie-uploads/',
+  destination: UPLOAD_DIR,
   filename: (req, file, cb) => {
     const ext = extname(file.originalname).toLowerCase();
     cb(null, `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`);
@@ -59,8 +64,7 @@ router.post('/', upload.single('file'), async (req, res) => {
     // Office/PDF formats — use officeparser
     else {
       const { parseOffice } = await import('officeparser');
-      const result = await parseOffice(filePath);
-      contentText = result.toText();
+      contentText = await parseOffice(filePath);
     }
 
     if (!contentText || contentText.trim().length === 0) {
