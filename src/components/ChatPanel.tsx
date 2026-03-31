@@ -68,6 +68,12 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
   const [figures, setFigures] = useState<FigureInfo[]>([]);
   const [figuresForMsgId, setFiguresForMsgId] = useState<string | null>(null);
   const [searchStatus, setSearchStatus] = useState('');
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
+  const [lightboxZoom, setLightboxZoom] = useState(1);
+  const [lightboxPos, setLightboxPos] = useState({ x: 0, y: 0 });
+  const [dragging, setDragging] = useState(false);
+  const dragStart = useRef({ x: 0, y: 0, posX: 0, posY: 0 });
+  const [imgContextMenu, setImgContextMenu] = useState<{ url: string; x: number; y: number } | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const MAX_FILES = 4;
@@ -150,6 +156,14 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
       inputRef.current.style.height = Math.min(inputRef.current.scrollHeight, 200) + 'px';
     }
   }, [input]);
+
+  // Close image context menu on click outside
+  useEffect(() => {
+    if (!imgContextMenu) return;
+    const handleClick = () => setImgContextMenu(null);
+    document.addEventListener('click', handleClick);
+    return () => document.removeEventListener('click', handleClick);
+  }, [imgContextMenu]);
 
   // Fill input with quoted text and position cursor after quote
   useEffect(() => {
@@ -523,7 +537,13 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
                   <div className="grid grid-cols-2 gap-2">
                     {figures.map(fig => (
                       <div key={fig.id} className="bg-dark-400 rounded-lg overflow-hidden border border-dark-50/30">
-                        <img src={fig.url} alt={fig.caption || 'Figure'} className="w-full cursor-pointer hover:opacity-80" onClick={() => window.open(fig.url, '_blank')} />
+                        <img
+                          src={fig.url}
+                          alt={fig.caption || 'Figure'}
+                          className="w-full cursor-pointer hover:opacity-80"
+                          onClick={() => { setLightboxUrl(fig.url); setLightboxZoom(1); setLightboxPos({ x: 0, y: 0 }); }}
+                          onContextMenu={(e) => { e.preventDefault(); setImgContextMenu({ url: fig.url, x: e.clientX, y: e.clientY }); }}
+                        />
                         {fig.caption && <p className="text-xs text-gray-400 p-2">{fig.caption}</p>}
                       </div>
                     ))}
@@ -649,6 +669,70 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
           </div>
         </div>
       </div>
+
+      {/* Image Lightbox */}
+      {lightboxUrl && (
+        <div
+          className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center"
+          onClick={() => setLightboxUrl(null)}
+          onWheel={(e) => {
+            e.preventDefault();
+            setLightboxZoom(prev => Math.max(0.2, Math.min(5, prev + (e.deltaY < 0 ? 0.2 : -0.2))));
+          }}
+        >
+          <div className="absolute top-4 right-4 flex gap-2 z-10">
+            <button onClick={(e) => { e.stopPropagation(); setLightboxZoom(prev => Math.min(5, prev + 0.3)); }} className="bg-dark-300 text-white px-3 py-1 rounded-lg text-sm hover:bg-dark-100">+</button>
+            <button onClick={(e) => { e.stopPropagation(); setLightboxZoom(prev => Math.max(0.2, prev - 0.3)); }} className="bg-dark-300 text-white px-3 py-1 rounded-lg text-sm hover:bg-dark-100">−</button>
+            <button onClick={(e) => { e.stopPropagation(); setLightboxZoom(1); setLightboxPos({ x: 0, y: 0 }); }} className="bg-dark-300 text-white px-3 py-1 rounded-lg text-sm hover:bg-dark-100">Reset</button>
+            <button onClick={() => setLightboxUrl(null)} className="bg-dark-300 text-white px-3 py-1 rounded-lg text-sm hover:bg-dark-100">&times;</button>
+          </div>
+          <img
+            src={lightboxUrl}
+            alt="Preview"
+            className="max-w-none cursor-grab active:cursor-grabbing"
+            style={{
+              transform: `translate(${lightboxPos.x}px, ${lightboxPos.y}px) scale(${lightboxZoom})`,
+              transition: dragging ? 'none' : 'transform 0.15s',
+            }}
+            onClick={(e) => e.stopPropagation()}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              setDragging(true);
+              dragStart.current = { x: e.clientX, y: e.clientY, posX: lightboxPos.x, posY: lightboxPos.y };
+            }}
+            onMouseMove={(e) => {
+              if (!dragging) return;
+              setLightboxPos({
+                x: dragStart.current.posX + (e.clientX - dragStart.current.x),
+                y: dragStart.current.posY + (e.clientY - dragStart.current.y),
+              });
+            }}
+            onMouseUp={() => setDragging(false)}
+            onMouseLeave={() => setDragging(false)}
+          />
+        </div>
+      )}
+
+      {/* Image Context Menu */}
+      {imgContextMenu && (
+        <div
+          className="fixed z-50 bg-dark-200 rounded-xl shadow-xl border border-dark-50/30 py-1 min-w-[160px]"
+          style={{ left: imgContextMenu.x, top: imgContextMenu.y }}
+        >
+          <button
+            onClick={() => {
+              onSave(`![Figure](${imgContextMenu.url})`, 'summary');
+              setImgContextMenu(null);
+            }}
+            className="w-full text-left px-3 py-2 text-sm hover:bg-mint-400/10 text-gray-300"
+          >
+            Save to Summary
+          </button>
+          <div className="border-t border-dark-50/20">
+            <button onClick={() => setImgContextMenu(null)} className="w-full text-left px-3 py-1.5 text-xs text-gray-600 hover:text-gray-400">Cancel</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
