@@ -95,7 +95,7 @@ function App() {
             fetchTodos(),
           ]);
           setDailySummaries(summaries);
-          setInsights(ins);
+          setInsights(ins.map((i: InsightItem) => ({ ...i, createdAt: i.createdAt || (i as any).created_at })));
           setTodayPapers(papers.map((p: TodayPaper) => ({ ...p, addedAt: p.addedAt || (p as any).added_at })));
           setTodos(todoItems.map((t: TodoItem) => ({ ...t, createdAt: t.createdAt || (t as any).created_at })));
         } catch (err) {

@@ -30,13 +30,14 @@ app.use(express.json({ limit: '10mb' }));
 
 // --- Constants ---
 
+// tokenParam: which parameter name the provider uses for max output tokens
 const PROVIDER_CONFIGS = {
-  openai:   { baseUrl: 'https://api.openai.com/v1', type: 'openai' },
-  claude:   { baseUrl: 'https://api.anthropic.com/v1', type: 'claude' },
-  deepseek: { baseUrl: 'https://api.deepseek.com/v1', type: 'openai' },
-  kimi:     { baseUrl: 'https://api.moonshot.cn/v1', type: 'openai' },
-  gemini:   { baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', type: 'openai' },
-  ionet:    { baseUrl: 'https://api.intelligence.io.solutions/api/v1', type: 'openai' },
+  openai:   { baseUrl: 'https://api.openai.com/v1', type: 'openai', tokenParam: 'max_completion_tokens' },
+  claude:   { baseUrl: 'https://api.anthropic.com/v1', type: 'claude', tokenParam: 'max_tokens' },
+  deepseek: { baseUrl: 'https://api.deepseek.com/v1', type: 'openai', tokenParam: 'max_tokens' },
+  kimi:     { baseUrl: 'https://api.moonshot.cn/v1', type: 'openai', tokenParam: 'max_tokens' },
+  gemini:   { baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', type: 'openai', tokenParam: 'max_tokens' },
+  ionet:    { baseUrl: 'https://api.intelligence.io.solutions/api/v1', type: 'openai', tokenParam: 'max_tokens' },
 };
 
 const COMPRESS_EVERY          = 20;
@@ -481,19 +482,22 @@ function stripInternalTags(text) {
 
 async function streamLLM(config, apiKey, model, signal, messages, onChunk) {
   if (config.type === 'claude') {
-    return streamClaude(apiKey, model, messages, onChunk, signal);
+    return streamClaude(config.tokenParam, apiKey, model, messages, onChunk, signal);
   }
-  return streamOpenAICompatible(config.baseUrl, apiKey, model, messages, onChunk, signal);
+  return streamOpenAICompatible(config.baseUrl, config.tokenParam, apiKey, model, messages, onChunk, signal);
 }
 
-async function streamOpenAICompatible(baseUrl, apiKey, model, messages, onChunk, signal) {
+async function streamOpenAICompatible(baseUrl, tokenParam, apiKey, model, messages, onChunk, signal) {
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
     },
-    body: JSON.stringify({ model, messages, max_tokens: LLM_MAX_TOKENS, stream: true }),
+    body: JSON.stringify({
+      model, messages, stream: true,
+      [tokenParam]: LLM_MAX_TOKENS,
+    }),
     signal,
   });
 
@@ -527,7 +531,7 @@ async function streamOpenAICompatible(baseUrl, apiKey, model, messages, onChunk,
   }
 }
 
-async function streamClaude(apiKey, model, messages, onChunk, signal) {
+async function streamClaude(tokenParam, apiKey, model, messages, onChunk, signal) {
   const systemMsgs = messages.filter(m => m.role === 'system');
   const systemText = systemMsgs.map(m => m.content).join('\n\n');
   const chatMsgs = messages.filter(m => m.role !== 'system');
@@ -540,7 +544,7 @@ async function streamClaude(apiKey, model, messages, onChunk, signal) {
       'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify({
-      model, max_tokens: LLM_MAX_TOKENS, system: systemText,
+      model, [tokenParam]: LLM_MAX_TOKENS, system: systemText,
       messages: chatMsgs, stream: true,
     }),
     signal,

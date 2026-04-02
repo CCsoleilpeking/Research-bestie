@@ -273,16 +273,30 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
     try {
       const config = getLLMConfig();
       console.log('[Chat] Edit resend:', text.slice(0, 100));
-      const response = await sendChatMessage(newMessages, config, (chunk) => {
-        setStreamingContent(chunk);
-      });
-      onChange([...newMessages, { id: genId(), role: 'assistant', content: response.content, timestamp: new Date().toISOString() }]);
+      const statusMap: Record<string, string> = {
+        searching: 'Searching the web...',
+        crawling: 'Reading full content...',
+        answering: 'Generating answer...',
+      };
+      const response = await sendChatMessage(
+        newMessages, config,
+        (chunk) => { setStreamingContent(chunk); },
+        undefined,
+        (status) => { setSearchStatus(statusMap[status] || ''); },
+      );
+      const assistantMsgId = genId();
+      onChange([...newMessages, { id: assistantMsgId, role: 'assistant', content: response.content, timestamp: new Date().toISOString() }]);
+      if (response.figures.length > 0) {
+        setFiguresForMsgId(assistantMsgId);
+        setFigures(response.figures);
+      }
     } catch (err) {
       console.error('[Chat] Edit resend error:', err);
       onChange([...newMessages, { id: genId(), role: 'assistant', content: `Error: ${err instanceof Error ? err.message : 'Unknown error'}`, timestamp: new Date().toISOString() }]);
     } finally {
       setLoading(false);
       setStreamingContent('');
+      setSearchStatus('');
     }
   }
 
@@ -675,9 +689,14 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
         <div
           className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center"
           onClick={() => setLightboxUrl(null)}
-          onWheel={(e) => {
-            e.preventDefault();
-            setLightboxZoom(prev => Math.max(0.2, Math.min(5, prev + (e.deltaY < 0 ? 0.2 : -0.2))));
+          ref={(el) => {
+            if (!el) return;
+            const handler = (e: WheelEvent) => {
+              e.preventDefault();
+              setLightboxZoom(prev => Math.max(0.2, Math.min(5, prev + (e.deltaY < 0 ? 0.2 : -0.2))));
+            };
+            el.addEventListener('wheel', handler, { passive: false });
+            return () => el.removeEventListener('wheel', handler);
           }}
         >
           <div className="absolute top-4 right-4 flex gap-2 z-10">
