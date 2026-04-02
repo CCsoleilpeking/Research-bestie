@@ -64,7 +64,8 @@ router.post('/', upload.single('file'), async (req, res) => {
     // Office/PDF formats — use officeparser
     else {
       const { parseOffice } = await import('officeparser');
-      contentText = await parseOffice(filePath);
+      const result = await parseOffice(filePath);
+      contentText = typeof result === 'string' ? result : result.toText();
     }
 
     if (!contentText || contentText.trim().length === 0) {
