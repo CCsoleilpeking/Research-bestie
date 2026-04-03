@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { InsightItem } from '../types';
+import { genId } from '../utils/id';
 
 interface Props { items: InsightItem[]; onChange: (items: InsightItem[]) => void; onShowPanel: () => void; flashSignal?: number; }
 const MAX_VISIBLE = 6;
@@ -8,6 +9,9 @@ export default function InsightsList({ items, onChange, onShowPanel, flashSignal
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [flashing, setFlashing] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [newText, setNewText] = useState('');
+  const addRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     if (flashSignal) {
@@ -16,6 +20,11 @@ export default function InsightsList({ items, onChange, onShowPanel, flashSignal
       return () => clearTimeout(t);
     }
   }, [flashSignal]);
+
+  useEffect(() => {
+    if (adding && addRef.current) addRef.current.focus();
+  }, [adding]);
+
   const [editing, setEditing] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
   const [showAll, setShowAll] = useState(false);
@@ -24,6 +33,13 @@ export default function InsightsList({ items, onChange, onShowPanel, flashSignal
   function saveEdit(id: string) { onChange(items.map(i => i.id === id ? { ...i, content: editText } : i)); setEditing(null); }
   function remove(id: string) { onChange(items.filter(i => i.id !== id)); }
   function toggle(id: string) { setExpandedId(expandedId === id ? null : id); }
+  function addInsight() {
+    const text = newText.trim();
+    if (!text) return;
+    onChange([{ id: genId(), content: text, createdAt: new Date().toISOString() }, ...items]);
+    setNewText('');
+    setAdding(false);
+  }
 
   const visible = showAll ? items : items.slice(0, MAX_VISIBLE);
   const hiddenCount = items.length - MAX_VISIBLE;
@@ -35,8 +51,28 @@ export default function InsightsList({ items, onChange, onShowPanel, flashSignal
           <span className={`font-semibold text-sm transition-colors ${flashing ? 'animate-pulse text-mint-400' : 'text-white'}`}>Insights</span>
           {flashing && <span className="animate-pulse text-lg text-[#00ff88]">✓</span>}
         </span>
-        <button onClick={onShowPanel} className="text-xs text-mint-400 hover:text-mint-300 font-medium">View</button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => setAdding(true)} className="text-mint-400 hover:text-mint-300 text-lg font-bold leading-none" title="Add insight">+</button>
+          <button onClick={onShowPanel} className="text-xs text-mint-400 hover:text-mint-300 font-medium">View</button>
+        </div>
       </div>
+      {adding && (
+        <div className="mb-2 bg-dark-100 rounded-2xl border border-mint-400/30 p-3">
+          <textarea
+            ref={addRef}
+            value={newText}
+            onChange={e => { setNewText(e.target.value); e.target.style.height = 'auto'; e.target.style.height = e.target.scrollHeight + 'px'; }}
+            placeholder="Write your insight..."
+            className="w-full text-sm bg-transparent text-white placeholder-gray-600 focus:outline-none resize-none"
+            style={{ minHeight: '40px' }}
+            rows={1}
+          />
+          <div className="flex gap-2 mt-2 justify-end">
+            <button onClick={() => { setAdding(false); setNewText(''); }} className="text-xs text-gray-500 hover:text-white px-3 py-1">Cancel</button>
+            <button onClick={addInsight} disabled={!newText.trim()} className="bg-mint-400 text-dark-600 px-3 py-1 rounded-lg text-xs font-semibold hover:opacity-80 disabled:opacity-30">Save</button>
+          </div>
+        </div>
+      )}
       <div className="space-y-1">
         {visible.map(item => {
           const isOpen = expandedId === item.id || hoveredId === item.id;
