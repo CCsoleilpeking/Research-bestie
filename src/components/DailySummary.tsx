@@ -85,7 +85,7 @@ export default function DailySummary({ items, onChange, insights, onChangeInsigh
   // Abstract edit/delete
   function removeAbstract(id: string) { onChange(items.filter(i => i.id !== id)); }
   function saveAbstract(id: string, content: string) {
-    onChange(items.map(i => i.id === id ? { ...i, content } : i));
+    onChange(items.map(i => i.id === id ? { ...i, content, fragments: [content] } : i));
     setEditingSection(null);
   }
 

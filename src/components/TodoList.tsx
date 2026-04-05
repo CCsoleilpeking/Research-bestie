@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import type { TodoItem } from '../types';
 import { genId } from '../utils/id';
 
@@ -8,6 +8,7 @@ const MAX_VISIBLE = 6;
 export default function TodoList({ items, onChange }: Props) {
   const [input, setInput] = useState('');
   const [showAll, setShowAll] = useState(false);
+  const isComposingRef = useRef(false);
   function add() { const text = input.trim(); if (!text) return; onChange([...items, { id: genId(), text, done: false, createdAt: new Date().toISOString() }]); setInput(''); }
   function toggle(id: string) { onChange(items.map(i => i.id === id ? { ...i, done: !i.done } : i)); }
   function remove(id: string) { onChange(items.filter(i => i.id !== id)); }
@@ -22,7 +23,7 @@ export default function TodoList({ items, onChange }: Props) {
         {pending > 0 && <span className="bg-mint-400/20 text-mint-400 text-xs px-2 py-0.5 rounded-full">{pending}</span>}
       </div>
       <div className="flex gap-1 mb-1.5">
-        <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && add()} placeholder="Add a task..." className="flex-1 text-xs border border-dark-50/30 rounded-xl px-2 py-1 bg-dark-100 text-white placeholder-gray-600 focus:ring-1 focus:ring-mint-400/30 focus:outline-none" />
+        <input value={input} onChange={e => setInput(e.target.value)} onCompositionStart={() => { isComposingRef.current = true; }} onCompositionEnd={() => { isComposingRef.current = false; }} onKeyDown={e => { if (e.key === 'Enter' && !isComposingRef.current) add(); }} placeholder="Add a task..." className="flex-1 text-xs border border-dark-50/30 rounded-xl px-2 py-1 bg-dark-100 text-white placeholder-gray-600 focus:ring-1 focus:ring-mint-400/30 focus:outline-none" />
         <button onClick={add} className="text-[10px] bg-mint-400 text-dark-600 px-2 py-1 rounded-lg font-semibold hover:opacity-80">Add</button>
       </div>
       <ul className="space-y-0.5">
