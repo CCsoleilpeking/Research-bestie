@@ -7,7 +7,7 @@ import type { ChatMessage } from '../types';
 import { genId } from '../utils/id';
 import { sendChatMessage, getLLMConfig, subscribeFigures } from '../utils/llm';
 import type { FigureInfo } from '../utils/llm';
-import { API_URL } from '../utils/api';
+import { API_URL, deleteMessagesAfterAPI } from '../utils/api';
 
 interface Props {
   messages: ChatMessage[];
@@ -262,9 +262,17 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
     const msgIndex = messages.findIndex(m => m.id === msgId);
     if (msgIndex === -1) return;
 
-    const updatedMsg = { ...messages[msgIndex], content: text };
+    const editedMsg = messages[msgIndex];
+    const updatedMsg = { ...editedMsg, content: text };
     const newMessages = [...messages.slice(0, msgIndex), updatedMsg];
     onChange(newMessages);
+
+    // Delete messages after edit point from backend DB
+    if (sessionId) {
+      deleteMessagesAfterAPI(sessionId, editedMsg.timestamp).catch(err =>
+        console.error('[Chat] Delete after edit error:', err)
+      );
+    }
 
     // Re-send to LLM
     setLoading(true);
@@ -281,7 +289,7 @@ export default function ChatPanel({ messages, onChange, onSelectText, onSave, on
       const response = await sendChatMessage(
         newMessages, config,
         (chunk) => { setStreamingContent(chunk); },
-        undefined,
+        sessionId,
         (status) => { setSearchStatus(statusMap[status] || ''); },
       );
       const assistantMsgId = genId();

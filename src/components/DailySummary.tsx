@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { genId } from '../utils/id';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -40,6 +41,8 @@ export default function DailySummary({ items, onChange, insights, onChangeInsigh
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [showMonthView, setShowMonthView] = useState(false);
   const [editingSection, setEditingSection] = useState<string | null>(null);
+  const [newFragText, setNewFragText] = useState('');
+  const [editFragText, setEditFragText] = useState('');
   const [flashing, setFlashing] = useState(false);
 
   useEffect(() => {
@@ -126,20 +129,58 @@ export default function DailySummary({ items, onChange, insights, onChangeInsigh
 
     return (
       <div className="space-y-6">
-        {fragments.length > 0 && (
+        {(fragments.length > 0 || summary) && (
           <div>
             <div className="flex items-center justify-between bg-cyan-400/10 rounded-lg px-3 py-1.5 mb-3">
               <h3 className="text-base font-bold text-cyan-400">Abstract</h3>
-              <div className="flex gap-3">
-                <button onClick={() => setEditingSection(`abstract:${date}`)} className="text-xs text-gray-400 hover:text-mint-400">Edit</button>
-                <button onClick={() => removeAbstract(summary!.id)} className="text-xs text-gray-400 hover:text-red-400">Delete</button>
-              </div>
+              <button onClick={() => setEditingSection(`add-abstract:${date}`)} className="text-cyan-400 hover:text-cyan-300 text-lg font-bold leading-none" title="Add to abstract">+</button>
             </div>
+            {editingSection === `add-abstract:${date}` && (
+              <div className="mb-3 bg-dark-100 rounded-2xl border border-cyan-400/30 p-3">
+                <textarea
+                  value={newFragText}
+                  onChange={e => { setNewFragText(e.target.value); e.target.style.height = 'auto'; e.target.style.height = e.target.scrollHeight + 'px'; }}
+                  placeholder="Add to summary..."
+                  className="w-full text-sm bg-transparent text-white placeholder-gray-600 focus:outline-none resize-none"
+                  style={{ minHeight: '40px' }}
+                  rows={1}
+                  autoFocus
+                />
+                <div className="flex gap-2 mt-2 justify-end">
+                  <button onClick={() => { setEditingSection(null); setNewFragText(''); }} className="text-xs text-gray-500 hover:text-white px-3 py-1">Cancel</button>
+                  <button onClick={() => {
+                    if (!newFragText.trim()) return;
+                    const newFrags = [...fragments, newFragText.trim()];
+                    if (summary) {
+                      onChange(items.map(i => i.id === summary.id ? { ...i, content: newFrags.join('\n\n'), fragments: newFrags } : i));
+                    } else {
+                      const id = genId();
+                      onChange([{ id, date, content: newFragText.trim(), fragments: [newFragText.trim()] }, ...items]);
+                    }
+                    setNewFragText('');
+                    setEditingSection(null);
+                  }} disabled={!newFragText.trim()} className="bg-cyan-400 text-dark-600 px-3 py-1 rounded-lg text-xs font-semibold hover:opacity-80 disabled:opacity-30">Save</button>
+                </div>
+              </div>
+            )}
             <div className="space-y-3">
               {fragments.map((frag, i) => (
-                <div key={i} className="rounded-xl border border-cyan-400/20 bg-cyan-400/5 px-4 py-3">
-                  <div className={proseClass}><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{frag}</ReactMarkdown></div>
-                </div>
+                editingSection === `frag:${date}:${i}` ? null : (
+                  <div key={i} className="rounded-xl border border-cyan-400/20 bg-cyan-400/5 px-4 py-3 group relative">
+                    <div className="absolute top-2 right-2 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button onClick={() => { setEditFragText(frag); setEditingSection(`frag:${date}:${i}`); }} className="bg-mint-400/20 text-mint-400 text-xs px-2.5 py-1 rounded-lg hover:bg-mint-400/30 font-medium">Edit</button>
+                      <button onClick={() => {
+                        const newFrags = fragments.filter((_, j) => j !== i);
+                        if (newFrags.length === 0) {
+                          removeAbstract(summary!.id);
+                        } else {
+                          onChange(items.map(it => it.id === summary!.id ? { ...it, content: newFrags.join('\n\n'), fragments: newFrags } : it));
+                        }
+                      }} className="bg-red-400/20 text-red-400 text-xs px-2.5 py-1 rounded-lg hover:bg-red-400/30 font-medium">Delete</button>
+                    </div>
+                    <div className={proseClass}><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{frag}</ReactMarkdown></div>
+                  </div>
+                )
               ))}
             </div>
           </div>
@@ -242,12 +283,12 @@ export default function DailySummary({ items, onChange, insights, onChangeInsigh
         </div>
       </div>
 
-      {selectedDate && !editingSection && (
-        <OverlayPanel title={selectedDate} onClose={() => setSelectedDate(null)}>
+      {selectedDate && !editingSection?.startsWith('abstract:') && !editingSection?.startsWith('insights:') && !editingSection?.startsWith('frag:') && (
+        <OverlayPanel title={selectedDate} onClose={() => { setSelectedDate(null); setEditingSection(null); }}>
           {renderDayContent(selectedDate)}
         </OverlayPanel>
       )}
-      {showMonthView && !editingSection && (
+      {showMonthView && !editingSection?.startsWith('abstract:') && !editingSection?.startsWith('insights:') && !editingSection?.startsWith('frag:') && (
         <OverlayPanel title={`Daily Summary — ${formatMonth(viewYear, viewMonth)}`} onClose={() => setShowMonthView(false)}>
           <div className="space-y-8">
             {getMonthDates().length > 0 ? getMonthDates().map(date => (
@@ -272,6 +313,29 @@ export default function DailySummary({ items, onChange, insights, onChangeInsigh
             title={`Editing Abstract — ${date}`}
             value={summary.content}
             onSave={(v) => { saveAbstract(summary.id, v); }}
+            onCancel={() => setEditingSection(null)}
+          />
+        );
+      })()}
+
+      {editingSection?.startsWith('frag:') && (() => {
+        const parts = editingSection.split(':');
+        const date = parts[1];
+        const fragIndex = parseInt(parts[2], 10);
+        const summary = getDateSummary(date);
+        const fragments = summary ? getFragments(summary) : [];
+        const frag = fragments[fragIndex];
+        if (!frag || !summary) return null;
+        return (
+          <MarkdownEditor
+            title={`Editing Fragment ${fragIndex + 1} — ${date}`}
+            value={frag}
+            onSave={(v) => {
+              const newFrags = [...fragments];
+              newFrags[fragIndex] = v.trim();
+              onChange(items.map(it => it.id === summary.id ? { ...it, content: newFrags.join('\n\n'), fragments: newFrags } : it));
+              setEditingSection(null);
+            }}
             onCancel={() => setEditingSection(null)}
           />
         );
